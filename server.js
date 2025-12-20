@@ -5,34 +5,60 @@ const WebSocket = require('ws');
 const tiles = {}; 
 const clients = new Set();
 
-// CONFIGURATION: 4x4 Tiles centered around origin
-const AREA = { minX: -2, minY: -2, maxX: 1, maxY: 1 };
-const HOLLOW = { minX: -1, minY: -1, maxX: 0, maxY: 0 };
+/**
+ * Initializes a tile with the correct protection level based on its location.
+ * Ring: (-2, -2) to (1, 1) is protected (Gray).
+ * Square of Publicity (Hollow): (-1, -1) to (0, 0) is public (White).
+ */
+function getOrInitTile(tx, ty) {
+    const key = `${ty},${tx}`;
+    if (tiles[key]) return tiles[key];
 
-// Helper to write text into the memory on startup
-function serverWrite(tileX, tileY, charX, charY, text) {
-    const key = `${tileY},${tileX}`;
-    if (!tiles[key]) tiles[key] = { 
-        content: " ".repeat(128), 
-        properties: { color: new Array(128).fill(0), cell_props: {} } 
-    };
-    
-    let content = tiles[key].content.split('');
-    for (let i = 0; i < text.length; i++) {
-        let cx = charX + i;
-        let cy = charY;
-        if (cx < 16) {
-            content[cy * 16 + cx] = text[i];
+    const inArea = (tx >= -2 && tx <= 1 && ty >= -2 && ty <= 1);
+    const inHollow = (tx >= -1 && tx <= 0 && ty >= -1 && ty <= 0);
+
+    // 2 = Owner-only (Gray), 0 = Public (White)
+    let writability = (inArea && !inHollow) ? 2 : 0;
+
+    tiles[key] = {
+        content: " ".repeat(128),
+        properties: {
+            writability: writability,
+            color: new Array(128).fill(0),
+            cell_props: {}
         }
-    }
-    tiles[key].content = content.join('');
+    };
+    return tiles[key];
 }
 
-// Pre-seed the world with your text
-// "Welcome to TinyOWOT!" on the top protected row
-serverWrite(-1, -2, 4, 2, "Welcome to TinyOWOT!");
-// "Square of Publicity" inside the hollow area
-serverWrite(-1, -1, 4, 1, "Square of Publicity");
+/**
+ * Writes text across tile boundaries. 
+ * Automatically calculates which tile each character belongs to.
+ */
+function writeText(startX, startY, startCX, startCY, text) {
+    for (let i = 0; i < text.length; i++) {
+        // Calculate global character positions
+        let globalCharX = (startX * 16) + startCX + i;
+        let globalCharY = (startY * 8) + startCY;
+
+        // Convert back to Tile + Local Char coordinates
+        let tx = Math.floor(globalCharX / 16);
+        let ty = Math.floor(globalCharY / 8);
+        let cx = globalCharX - (tx * 16);
+        let cy = globalCharY - (ty * 8);
+
+        const tile = getOrInitTile(tx, ty);
+        let contentArr = tile.content.split('');
+        contentArr[cy * 16 + cx] = text[i];
+        tile.content = contentArr.join('');
+    }
+}
+
+// 1. WELCOME TEXT (On the top protected wall)
+writeText(-1, -2, 6, 4, "Welcome to TinyOWOT!");
+
+// 2. PUBLIC SQUARE TEXT (Inside the hollow area)
+writeText(-1, -1, 7, 4, "Square of Publicity");
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -43,9 +69,7 @@ const wss = new WebSocket.Server({ server });
 
 function broadcast(data, skipWs = null) {
     const msg = JSON.stringify(data);
-    clients.forEach(client => {
-        if (client !== skipWs && client.readyState === WebSocket.OPEN) client.send(msg);
-    });
+    clients.forEach(c => { if (c !== skipWs && c.readyState === WebSocket.OPEN) c.send(msg); });
 }
 
 wss.on('connection', (ws) => {
@@ -56,78 +80,59 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         const data = JSON.parse(message);
 
-        // FETCHING
         if (data.kind === "fetch") {
             const responseTiles = {};
             data.fetchRectangles.forEach(rect => {
                 for (let y = rect.minY; y <= rect.maxY; y++) {
                     for (let x = rect.minX; x <= rect.maxX; x++) {
-                        const key = `${y},${x}`;
-                        responseTiles[key] = tiles[key] || null;
+                        responseTiles[`${y},${x}`] = getOrInitTile(x, y);
                     }
                 }
             });
             ws.send(JSON.stringify({ kind: "fetch", tiles: responseTiles, request: data.request }));
         }
 
-        // WRITING + HOLLOW PROTECTION LOGIC
         if (data.kind === "write") {
             const accepted = [], rejected = {}, tileUpdates = {};
-
             data.edits.forEach(edit => {
                 const [y, x, charY, charX, time, char, id, color] = edit;
-                
-                // HOLLOW LOGIC:
-                // Is it in the big square?
-                const inArea = (x >= AREA.minX && x <= AREA.maxX && y >= AREA.minY && y <= AREA.maxY);
-                // Is it in the hollow center?
-                const inHollow = (x >= HOLLOW.minX && x <= HOLLOW.maxX && y >= HOLLOW.minY && y <= HOLLOW.maxY);
+                const tile = getOrInitTile(x, y);
 
-                // If it's in the area but NOT the hollow center, it's protected
-                if (inArea && !inHollow) {
+                // Reject if tile is Owner-Only (writability 2)
+                if (tile.properties.writability === 2) {
                     rejected[id] = 1; 
                     return;
                 }
 
-                const key = `${y},${x}`;
-                if (!tiles[key]) tiles[key] = { content: " ".repeat(128), properties: { color: new Array(128).fill(0), cell_props: {} } };
-
-                let content = tiles[key].content.split('');
-                content[charY * 16 + charX] = char;
-                tiles[key].content = content.join('');
-                if (color !== undefined) tiles[key].properties.color[charY * 16 + charX] = color;
+                let contentArr = tile.content.split('');
+                contentArr[charY * 16 + charX] = char;
+                tile.content = contentArr.join('');
+                if (color !== undefined) tile.properties.color[charY * 16 + charX] = color;
                 
                 accepted.push(id);
-                tileUpdates[key] = tiles[key];
+                tileUpdates[`${y},${x}`] = tile;
             });
-
             ws.send(JSON.stringify({ kind: "write", accepted, rejected, request: data.request }));
             if (Object.keys(tileUpdates).length > 0) broadcast({ kind: "tileUpdate", tiles: tileUpdates }, ws);
         }
 
-        // CHAT
         if (data.kind === "chat") {
             broadcast({
-                kind: "chat", nickname: data.nickname || "Guest", message: data.message,
-                id: ws.id, color: data.color || "#000", location: data.location, date: Date.now()
+                kind: "chat", nickname: data.nickname, message: data.message,
+                id: ws.id, color: data.color, location: data.location, date: Date.now()
             });
         }
 
-        // LINKS
         if (data.kind === "link") {
             const { tileX, tileY, charX, charY, url, link_tileX, link_tileY } = data.data;
-            const key = `${tileY},${tileX}`;
-            if (!tiles[key]) tiles[key] = { content: " ".repeat(128), properties: { color: new Array(128).fill(0), cell_props: {} } };
-            if (!tiles[key].properties.cell_props) tiles[key].properties.cell_props = {};
-            if (!tiles[key].properties.cell_props[charY]) tiles[key].properties.cell_props[charY] = {};
-
-            tiles[key].properties.cell_props[charY][charX] = {
+            const tile = getOrInitTile(tileX, tileY);
+            if (!tile.properties.cell_props[charY]) tile.properties.cell_props[charY] = {};
+            tile.properties.cell_props[charY][charX] = {
                 link: data.type === "url" ? { type: "url", url } : { type: "coord", link_tileX, link_tileY }
             };
-            broadcast({ kind: "tileUpdate", tiles: { [key]: tiles[key] } });
+            broadcast({ kind: "tileUpdate", tiles: { [`${tileY},${tileX}`]: tile } });
         }
 
-        // CURSOR
         if (data.kind === "cursor") {
             broadcast({ kind: "cursor", channel: ws.id, position: data.position, hidden: data.hidden }, ws);
         }
@@ -139,4 +144,4 @@ wss.on('connection', (ws) => {
     });
 });
 
-server.listen(8080, () => console.log('Server running: http://localhost:8080'));
+server.listen(8080, () => console.log('Server running on http://localhost:8080'));
