@@ -5,70 +5,150 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>TinyOWOT</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #f0f0f0; font-family: monospace; touch-action: none; }
-        canvas { display: block; }
+        body { margin: 0; overflow: hidden; background: #f0f0f0; font-family: 'Courier New', monospace; touch-action: none; user-select: none; -webkit-user-select: none; }
+        canvas { display: block; image-rendering: pixelated; }
+        
+        /* UI Overlay */
+        #ui-layer { position: fixed; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 10; }
+        .panel { pointer-events: auto; background: rgba(255,255,255,0.9); border: 1px solid #999; padding: 5px; margin: 5px; display: inline-block; vertical-align: top; font-size: 13px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
+        
+        .color-picker { display: flex; gap: 3px; margin-top: 5px; }
+        .color-swatch { width: 22px; height: 22px; border: 1px solid #000; cursor: pointer; border-radius: 2px; }
+        .active-color { outline: 3px solid #007bff; z-index: 1; }
 
-        /* The Secret Sauce: A hidden input that is technically "visible" to the browser */
-        #mobile-input-field {
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            opacity: 0;
-            pointer-events: none;
-            z-index: -1;
-            width: 1px;
-            height: 1px;
-            font-size: 16px; /* Prevents iOS from zooming in on focus */
-        }
+        #chat-panel { position: fixed; bottom: 0; right: 0; width: 280px; height: 200px; display: flex; flex-direction: column; margin: 0; border-bottom: none; border-right: none; }
+        #messages { flex: 1; overflow-y: auto; background: white; font-size: 11px; padding: 5px; border: 1px solid #ccc; }
+        #chat-input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #ccc; border-top: none; font-size: 14px; pointer-events: auto; }
+        
+        #hidden-input { position: absolute; top: 0; left: 0; width: 0; height: 0; opacity: 0; border: none; padding: 0; z-index: -1; pointer-events: none; }
+        
+        button { cursor: pointer; padding: 4px 8px; font-size: 12px; }
+        #coords { position: fixed; bottom: 5px; left: 5px; font-size: 10px; color: #666; pointer-events: none; }
 
-        #ui { position: fixed; top: 10px; left: 10px; background: rgba(255,255,255,0.8); padding: 10px; border: 1px solid #ccc; pointer-events: none; }
-        .kb-status { color: green; font-weight: bold; }
+        .system-msg { color: #888; font-style: italic; }
+        .error-msg { color: #d00; font-weight: bold; }
     </style>
 </head>
 <body>
 
-    <div id="ui">
-        Tap anywhere to type<br>
-        <span id="coords">X: 0, Y: 0</span><br>
-        <span id="kb-indicator">Keyboard: Hidden</span>
+<div id="ui-layer">
+    <div class="panel">
+        <strong>Tools</strong><br>
+        <span id="current-color-name">Black</span>
+        <div class="color-picker" id="palette"></div>
+        <div style="margin-top:8px;">
+            <button onclick="promptLink('url')">URL</button>
+            <button onclick="promptLink('coord')">Coord</button>
+            <button onclick="promptLink('note')">Note</button>
+        </div>
     </div>
+    
+    <div id="link-info" class="panel" style="display:none; border-color: #007bff;">
+        <strong>Link:</strong> <span id="link-display"></span>
+        <button id="link-action-btn">Go</button>
+    </div>
+</div>
 
-    <!-- This input field is what triggers the virtual keyboard -->
-    <input type="text" id="mobile-input-field" autocomplete="off" autocapitalize="off" spellcheck="false">
+<div id="chat-panel" class="panel">
+    <div id="messages"></div>
+    <input type="text" id="chat-input" placeholder="Chat or /help...">
+</div>
 
-    <canvas id="world"></canvas>
+<div id="coords">X: 0, Y: 0</div>
+
+<!-- Mobile Keyboard Trigger -->
+<input type="text" id="hidden-input" autocomplete="off" autocapitalize="off" spellcheck="false">
+
+<canvas id="world"></canvas>
 
 <script>
     const canvas = document.getElementById('world');
     const ctx = canvas.getContext('2d');
-    const mobileInput = document.getElementById('mobile-input-field');
-    const kbIndicator = document.getElementById('kb-indicator');
+    const hiddenInput = document.getElementById('hidden-input');
+    const chatInput = document.getElementById('chat-input');
+    const msgBox = document.getElementById('messages');
     
+    // Config
+    const TILE_W = 16, TILE_H = 8;
+    const CHAR_W = 10, CHAR_H = 20;
+    const PALETTE = [0x000000, 0xff0000, 0x00aa00, 0x0000ff, 0xff00ff, 0x00aaaa, 0x888888, 0xaaaa00];
+    const PALETTE_NAMES = ["Black", "Red", "Green", "Blue", "Purple", "Teal", "Gray", "Yellow"];
+
     let cameraX = 0, cameraY = 0;
     let tiles = {};
     let selectedCell = { tx: 0, ty: 0, cx: 0, cy: 0 };
-    let ws;
+    let currentColor = 0;
+    let nickname = "User" + Math.floor(Math.random()*100);
+    let ws = null;
+    let currentServerUrl = `ws://${location.host}`;
 
-    // Connect to WebSocket
-    function connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(`${protocol}//${location.host}`);
-        ws.onopen = () => fetchVisibleTiles();
+    // --- Networking & Commands ---
+
+    function connect(url) {
+        if (ws) ws.close();
+        addChatMessage(`System`, `Connecting to ${url}...`, "system-msg");
+        
+        ws = new WebSocket(url);
+        currentServerUrl = url;
+        tiles = {}; // Clear old world data
+
+        ws.onopen = () => {
+            addChatMessage(`System`, `Connected!`, "system-msg");
+            fetchVisibleTiles();
+        };
+
         ws.onmessage = (msg) => {
             const data = JSON.parse(msg.data);
             if (data.kind === "fetch" || data.kind === "tileUpdate") {
                 Object.assign(tiles, data.tiles);
+                checkLinkAtCursor();
                 render();
             }
+            if (data.kind === "chat") {
+                addChatMessage(data.nickname || data.id, data.message);
+            }
         };
+
+        ws.onerror = () => addChatMessage(`Error`, `Failed to connect to server.`, "error-msg");
     }
 
+    function addChatMessage(sender, text, className = "") {
+        const div = document.createElement('div');
+        if(className) div.className = className;
+        div.innerHTML = `<b>${sender}:</b> ${text}`;
+        msgBox.appendChild(div);
+        msgBox.scrollTop = msgBox.scrollHeight;
+    }
+
+    function processCommand(val) {
+        const args = val.split(" ");
+        const cmd = args[0].toLowerCase();
+
+        if (cmd === "/help") {
+            addChatMessage("Help", "/nick [name], /warp [url], /help", "system-msg");
+        } else if (cmd === "/nick") {
+            nickname = args.slice(1).join(" ") || "Anonymous";
+            addChatMessage("System", `Nickname changed to: ${nickname}`, "system-msg");
+        } else if (cmd === "/warp") {
+            const url = args[1];
+            if (!url) return addChatMessage("Error", "Usage: /warp ws://ip:port", "error-msg");
+            connect(url);
+        } else {
+            // Standard Chat
+            ws.send(JSON.stringify({ kind: "chat", message: val, nickname: nickname }));
+        }
+    }
+
+    // --- Core Logic ---
+
     function fetchVisibleTiles() {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        const minTX = Math.floor(cameraX / 160);
-        const maxTX = Math.ceil((cameraX + canvas.width) / 160);
-        const minTY = Math.floor(cameraY / 160);
-        const maxTY = Math.ceil((cameraY + canvas.height) / 160);
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const margin = 1;
+        const minTX = Math.floor(cameraX / 160) - margin;
+        const maxTX = Math.ceil((cameraX + canvas.width) / 160) + margin;
+        const minTY = Math.floor(cameraY / 160) - margin;
+        const maxTY = Math.ceil((cameraY + canvas.height) / 160) + margin;
+
         ws.send(JSON.stringify({
             kind: "fetch",
             fetchRectangles: [{ minX: minTX, maxX: maxTX, minY: minTY, maxY: maxTY }],
@@ -76,62 +156,10 @@
         }));
     }
 
-    // --- Input Logic ---
-
-    // 1. Tapping the canvas
-    canvas.addEventListener('pointerdown', (e) => {
-        // Calculate grid position
-        const worldX = e.clientX + cameraX;
-        const worldY = e.clientY + cameraY;
-        selectedCell.tx = Math.floor(worldX / 160);
-        selectedCell.ty = Math.floor(worldY / 160);
-        selectedCell.cx = Math.floor((((worldX % 160) + 160) % 160) / 10);
-        selectedCell.cy = Math.floor((((worldY % 160) + 160) % 160) / 20);
-
-        // FORCE KEYBOARD
-        mobileInput.focus();
-        kbIndicator.innerText = "Keyboard: ACTIVE";
-        kbIndicator.classList.add("kb-status");
-
-        render();
-    });
-
-    // 2. Handling the text input from virtual keyboard
-    mobileInput.addEventListener('input', (e) => {
-        const char = e.data || e.target.value.slice(-1); // Handle different mobile event types
-        if (char) {
-            writeChar(char);
-            e.target.value = ""; // Clear for next character
-        }
-    });
-
-    // Handle Backspace
-    mobileInput.addEventListener('keydown', (e) => {
-        if (e.key === "Backspace") {
-            writeChar(" ");
-        }
-    });
-
-    function writeChar(char) {
-        ws.send(JSON.stringify({
-            kind: "write",
-            edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), char, Math.random()]]
-        }));
-        
-        // Advance cursor
-        selectedCell.cx++;
-        if (selectedCell.cx >= 16) {
-            selectedCell.cx = 0;
-            selectedCell.tx++;
-        }
-        render();
-    }
-
-    // --- Rendering Logic ---
     function render() {
         ctx.fillStyle = "#f0f0f0";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.font = `20px monospace`;
+        ctx.font = `${CHAR_H}px monospace`;
         ctx.textBaseline = "top";
 
         const startTX = Math.floor(cameraX / 160);
@@ -145,35 +173,70 @@
                 const xPos = tx * 160 - cameraX;
                 const yPos = ty * 160 - cameraY;
 
+                if (tile && tile.properties.writability === 2) {
+                    ctx.fillStyle = "#e5e5e5";
+                    ctx.fillRect(xPos, yPos, 160, 160);
+                }
+
                 ctx.strokeStyle = "#ddd";
                 ctx.strokeRect(xPos, yPos, 160, 160);
 
                 if (tile) {
-                    ctx.fillStyle = "#000";
-                    for (let i = 0; i < 128; i++) {
-                        const cx = i % 16;
-                        const cy = Math.floor(i / 16);
-                        const char = tile.content[i];
-                        if (char !== " ") {
-                            ctx.fillText(char, xPos + (cx * 10), yPos + (cy * 20));
+                    const props = tile.properties;
+                    for (let cy = 0; cy < TILE_H; cy++) {
+                        for (let cx = 0; cx < TILE_W; cx++) {
+                            const idx = cy * 16 + cx;
+                            const char = tile.content[idx];
+                            const colorIdx = (props.color && props.color[idx]) ? props.color[idx] : 0;
+                            const cellProp = (props.cell_props[cy] && props.cell_props[cy][cx]) ? props.cell_props[cy][cx] : null;
+
+                            const charX = xPos + (cx * CHAR_W);
+                            const charY = yPos + (cy * CHAR_H);
+
+                            if (cellProp && cellProp.link) {
+                                ctx.beginPath();
+                                if (cellProp.link.type === 'url') { ctx.strokeStyle = "blue"; ctx.setLineDash([]); }
+                                else if (cellProp.link.type === 'coord') { ctx.strokeStyle = "green"; ctx.setLineDash([]); }
+                                else { ctx.strokeStyle = "#333"; ctx.setLineDash([2, 2]); }
+                                ctx.moveTo(charX, charY + CHAR_H - 2);
+                                ctx.lineTo(charX + CHAR_W, charY + CHAR_H - 2);
+                                ctx.stroke();
+                                ctx.setLineDash([]);
+                            }
+
+                            if (char && char !== " ") {
+                                ctx.fillStyle = '#' + (PALETTE[colorIdx] || 0).toString(16).padStart(6, '0');
+                                ctx.fillText(char, charX, charY);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Draw selection cursor
-        ctx.strokeStyle = "blue";
-        ctx.strokeRect(
-            selectedCell.tx * 160 + selectedCell.cx * 10 - cameraX,
-            selectedCell.ty * 160 + selectedCell.cy * 20 - cameraY,
-            10, 20
-        );
+        ctx.strokeStyle = "#007bff";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(selectedCell.tx * 160 + selectedCell.cx * 10 - cameraX, 
+                       selectedCell.ty * 160 + selectedCell.cy * 20 - cameraY, 10, 20);
+        ctx.lineWidth = 1;
     }
 
-    // Dragging Logic
+    // --- Input Handling ---
+
     let isDragging = false;
     let lastMouse = { x: 0, y: 0 };
+    let tapStart = { x: 0, y: 0 };
+
+    function focusKeyboard() {
+        setTimeout(() => { hiddenInput.focus(); hiddenInput.click(); }, 10);
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+        isDragging = true;
+        lastMouse = { x: e.clientX, y: e.clientY };
+        tapStart = { x: e.clientX, y: e.clientY };
+    });
+
     window.addEventListener('pointermove', (e) => {
         if (isDragging) {
             cameraX -= (e.clientX - lastMouse.x);
@@ -183,19 +246,132 @@
             render();
         }
     });
-    window.addEventListener('pointerdown', (e) => { isDragging = true; lastMouse = { x: e.clientX, y: e.clientY }; });
-    window.addEventListener('pointerup', () => { isDragging = false; fetchVisibleTiles(); });
 
-    // Resize handling
-    window.addEventListener('resize', () => {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-        render();
+    window.addEventListener('pointerup', (e) => {
+        const dist = Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y);
+        if (dist < 10) {
+            const worldX = e.clientX + cameraX;
+            const worldY = e.clientY + cameraY;
+            selectedCell.tx = Math.floor(worldX / 160);
+            selectedCell.ty = Math.floor(worldY / 160);
+            selectedCell.cx = Math.floor((((worldX % 160) + 160) % 160) / 10);
+            selectedCell.cy = Math.floor((((worldY % 160) + 160) % 160) / 20);
+            focusKeyboard();
+            checkLinkAtCursor();
+            render();
+        } else {
+            fetchVisibleTiles();
+        }
+        isDragging = false;
     });
 
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    connect();
+    hiddenInput.addEventListener('input', (e) => {
+        const char = e.data || e.target.value.slice(-1);
+        if (char) {
+            ws.send(JSON.stringify({
+                kind: "write",
+                edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), char, Math.random(), currentColor]]
+            }));
+            selectedCell.cx++;
+            if (selectedCell.cx >= 16) { selectedCell.cx = 0; selectedCell.tx++; }
+            render();
+        }
+        hiddenInput.value = ""; 
+    });
+
+    window.addEventListener('keydown', (e) => {
+        if (document.activeElement === chatInput) return;
+        if (e.key === "Backspace") {
+            ws.send(JSON.stringify({ kind: "write", edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), " ", Math.random(), currentColor]]}));
+            selectedCell.cx--;
+            if (selectedCell.cx < 0) { selectedCell.cx = 15; selectedCell.tx--; }
+            render();
+        }
+        if (e.key.startsWith("Arrow")) {
+            if (e.key === "ArrowRight") selectedCell.cx++;
+            if (e.key === "ArrowLeft") selectedCell.cx--;
+            if (e.key === "ArrowUp") selectedCell.cy--;
+            if (e.key === "ArrowDown") selectedCell.cy++;
+            checkLinkAtCursor();
+            render();
+        }
+    });
+
+    chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && chatInput.value.trim()) {
+            processCommand(chatInput.value);
+            chatInput.value = "";
+            chatInput.blur();
+        }
+    });
+
+    // --- Link Tools ---
+
+    function checkLinkAtCursor() {
+        const tile = tiles[`${selectedCell.ty},${selectedCell.tx}`];
+        const ui = document.getElementById('link-info');
+        if (tile && tile.properties.cell_props[selectedCell.cy] && tile.properties.cell_props[selectedCell.cy][selectedCell.cx]) {
+            const data = tile.properties.cell_props[selectedCell.cy][selectedCell.cx];
+            ui.style.display = 'inline-block';
+            const display = document.getElementById('link-display');
+            const btn = document.getElementById('link-action-btn');
+            btn.style.display = 'inline-block';
+
+            if (data.link.type === 'url') {
+                display.innerText = data.link.url;
+                btn.onclick = () => window.open(data.link.url.startsWith('http') ? data.link.url : 'http://'+data.link.url, '_blank');
+                btn.innerText = "Open";
+            } else if (data.link.type === 'coord') {
+                display.innerText = `${data.link.link_tileX}, ${data.link.link_tileY}`;
+                btn.onclick = () => {
+                    cameraX = (data.link.link_tileX * 160) - (canvas.width / 2);
+                    cameraY = (data.link.link_tileY * 160) - (canvas.height / 2);
+                    fetchVisibleTiles(); render();
+                };
+                btn.innerText = "Jump";
+            } else {
+                display.innerText = "Note";
+                btn.style.display = 'none';
+            }
+        } else {
+            ui.style.display = 'none';
+        }
+    }
+
+    function promptLink(type) {
+        if (type === 'url') {
+            const url = prompt("URL:");
+            if (url) sendLinkUpdate({ type: 'url', url });
+        } else if (type === 'coord') {
+            const tx = prompt("Tile X:"), ty = prompt("Tile Y:");
+            if (tx !== null) sendLinkUpdate({ type: 'coord', link_tileX: parseInt(tx), link_tileY: parseInt(ty) });
+        } else { sendLinkUpdate({ type: 'note' }); }
+    }
+
+    function sendLinkUpdate(ld) {
+        ws.send(JSON.stringify({ kind: "link", type: ld.type, tileX: selectedCell.tx, tileY: selectedCell.ty, charX: selectedCell.cx, charY: selectedCell.cy, data: ld }));
+    }
+
+    // --- Init ---
+    window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; render(); });
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    
+    // Build Palette
+    const p = document.getElementById('palette');
+    PALETTE.forEach((color, i) => {
+        const s = document.createElement('div');
+        s.className = 'color-swatch' + (i === 0 ? ' active-color' : '');
+        s.style.backgroundColor = '#' + color.toString(16).padStart(6, '0');
+        s.onclick = () => {
+            document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
+            s.classList.add('active-color');
+            currentColor = i;
+            document.getElementById('current-color-name').innerText = PALETTE_NAMES[i];
+        };
+        p.appendChild(s);
+    });
+
+    connect(currentServerUrl);
 </script>
 </body>
 </html>
