@@ -5,10 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>TinyOWOT</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #f0f0f0; font-family: 'Courier New', monospace; touch-action: none; user-select: none; -webkit-user-select: none; }
+        body { margin: 0; overflow: hidden; background: #eee; font-family: 'Courier New', monospace; touch-action: none; user-select: none; -webkit-user-select: none; }
         canvas { display: block; image-rendering: pixelated; }
         
-        /* UI Overlay */
         #ui-layer { position: fixed; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 10; }
         .panel { pointer-events: auto; background: rgba(255,255,255,0.9); border: 1px solid #999; padding: 5px; margin: 5px; display: inline-block; vertical-align: top; font-size: 13px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
         
@@ -16,17 +15,17 @@
         .color-swatch { width: 22px; height: 22px; border: 1px solid #000; cursor: pointer; border-radius: 2px; }
         .active-color { outline: 3px solid #007bff; z-index: 1; }
 
-        #chat-panel { position: fixed; bottom: 0; right: 0; width: 280px; height: 200px; display: flex; flex-direction: column; margin: 0; border-bottom: none; border-right: none; }
-        #messages { flex: 1; overflow-y: auto; background: white; font-size: 11px; padding: 5px; border: 1px solid #ccc; }
-        #chat-input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #ccc; border-top: none; font-size: 14px; pointer-events: auto; }
+        #chat-panel { position: fixed; bottom: 0; right: 0; width: 300px; height: 220px; display: flex; flex-direction: column; margin: 0; border: 1px solid #999; }
+        #messages { flex: 1; overflow-y: auto; background: white; font-size: 12px; padding: 5px; }
+        #chat-input { width: 100%; box-sizing: border-box; padding: 10px; border: none; border-top: 1px solid #999; font-size: 14px; pointer-events: auto; }
         
-        #hidden-input { position: absolute; top: 0; left: 0; width: 0; height: 0; opacity: 0; border: none; padding: 0; z-index: -1; pointer-events: none; }
+        #hidden-input { position: absolute; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; border: none; padding: 0; z-index: -1; pointer-events: none; }
         
         button { cursor: pointer; padding: 4px 8px; font-size: 12px; }
         #coords { position: fixed; bottom: 5px; left: 5px; font-size: 10px; color: #666; pointer-events: none; }
 
-        .system-msg { color: #888; font-style: italic; }
-        .error-msg { color: #d00; font-weight: bold; }
+        .system { color: #888; font-style: italic; }
+        .error { color: #d00; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -34,7 +33,7 @@
 <div id="ui-layer">
     <div class="panel">
         <strong>Tools</strong><br>
-        <span id="current-color-name">Black</span>
+        Color: <span id="cur-col-name">Black</span>
         <div class="color-picker" id="palette"></div>
         <div style="margin-top:8px;">
             <button onclick="promptLink('url')">URL</button>
@@ -55,8 +54,6 @@
 </div>
 
 <div id="coords">X: 0, Y: 0</div>
-
-<!-- Mobile Keyboard Trigger -->
 <input type="text" id="hidden-input" autocomplete="off" autocapitalize="off" spellcheck="false">
 
 <canvas id="world"></canvas>
@@ -80,20 +77,16 @@
     let currentColor = 0;
     let nickname = "User" + Math.floor(Math.random()*100);
     let ws = null;
-    let currentServerUrl = `wss://${location.host}`;
 
     // --- Networking & Commands ---
 
     function connect(url) {
         if (ws) ws.close();
-        addChatMessage(`System`, `Connecting to ${url}...`, "system-msg");
+        addChatMessage("System", `Connecting to ${url}...`, "system");
         
         ws = new WebSocket(url);
-        currentServerUrl = url;
-        tiles = {}; // Clear old world data
-
         ws.onopen = () => {
-            addChatMessage(`System`, `Connected!`, "system-msg");
+            addChatMessage("System", "Connected!", "system");
             fetchVisibleTiles();
         };
 
@@ -101,15 +94,14 @@
             const data = JSON.parse(msg.data);
             if (data.kind === "fetch" || data.kind === "tileUpdate") {
                 Object.assign(tiles, data.tiles);
-                checkLinkAtCursor();
                 render();
             }
             if (data.kind === "chat") {
-                addChatMessage(data.nickname || data.id, data.message);
+                addChatMessage(data.nickname || ("ID:"+data.id), data.message);
             }
         };
 
-        ws.onerror = () => addChatMessage(`Error`, `Failed to connect to server.`, "error-msg");
+        ws.onerror = () => addChatMessage("Error", "Connection failed.", "error");
     }
 
     function addChatMessage(sender, text, className = "") {
@@ -121,43 +113,63 @@
     }
 
     function processCommand(val) {
-        const args = val.split(" ");
-        const cmd = args[0].toLowerCase();
-
-        if (cmd === "/help") {
-            addChatMessage("Help", "/nick [name], /warp [url], /help", "system-msg");
-        } else if (cmd === "/nick") {
-            nickname = args.slice(1).join(" ") || "Anonymous";
-            addChatMessage("System", `Nickname changed to: ${nickname}`, "system-msg");
-        } else if (cmd === "/warp") {
-            const url = args[1];
-            if (!url) return addChatMessage("Error", "Usage: /warp ws://ip:port", "error-msg");
-            connect(url);
+        if (val.startsWith("/help")) {
+            addChatMessage("Help", "/nick [name], /warp [url], /help", "system");
+        } else if (val.startsWith("/nick ")) {
+            nickname = val.replace("/nick ", "").trim() || "Anon";
+            addChatMessage("System", `Name set to: ${nickname}`, "system");
+        } else if (val.startsWith("/warp ")) {
+            const url = val.replace("/warp ", "").trim();
+            connect(url.includes("://") ? url : "ws://" + url);
         } else {
             // Standard Chat
-            ws.send(JSON.stringify({ kind: "chat", message: val, nickname: nickname }));
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ kind: "chat", message: val, nickname: nickname }));
+            }
         }
     }
 
-    // --- Core Logic ---
+    // --- Tile & Writing Logic (Optimistic) ---
 
-    function fetchVisibleTiles() {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        const margin = 1;
-        const minTX = Math.floor(cameraX / 160) - margin;
-        const maxTX = Math.ceil((cameraX + canvas.width) / 160) + margin;
-        const minTY = Math.floor(cameraY / 160) - margin;
-        const maxTY = Math.ceil((cameraY + canvas.height) / 160) + margin;
-
-        ws.send(JSON.stringify({
-            kind: "fetch",
-            fetchRectangles: [{ minX: minTX, maxX: maxTX, minY: minTY, maxY: maxTY }],
-            request: "view"
-        }));
+    function getLocalTile(tx, ty) {
+        const key = `${ty},${tx}`;
+        if (!tiles[key]) {
+            tiles[key] = {
+                content: " ".repeat(128),
+                properties: { writability: 0, color: new Array(128).fill(0), cell_props: {} }
+            };
+        }
+        return tiles[key];
     }
 
+    function handleWrite(char) {
+        const { tx, ty, cx, cy } = selectedCell;
+        const tile = getLocalTile(tx, ty);
+
+        // Optimistic Update: Change locally immediately
+        let contentArr = tile.content.split('');
+        contentArr[cy * 16 + cx] = char;
+        tile.content = contentArr.join('');
+        tile.properties.color[cy * 16 + cx] = currentColor;
+
+        // Send to server
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                kind: "write",
+                edits: [[ty, tx, cy, cx, Date.now(), char, Math.random(), currentColor]]
+            }));
+        }
+
+        // Advance cursor
+        selectedCell.cx++;
+        if (selectedCell.cx >= 16) { selectedCell.cx = 0; selectedCell.tx++; }
+        render();
+    }
+
+    // --- Rendering ---
+
     function render() {
-        ctx.fillStyle = "#f0f0f0";
+        ctx.fillStyle = "#fff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.font = `${CHAR_H}px monospace`;
         ctx.textBaseline = "top";
@@ -174,7 +186,7 @@
                 const yPos = ty * 160 - cameraY;
 
                 if (tile && tile.properties.writability === 2) {
-                    ctx.fillStyle = "#e5e5e5";
+                    ctx.fillStyle = "#e0e0e0";
                     ctx.fillRect(xPos, yPos, 160, 160);
                 }
 
@@ -182,30 +194,27 @@
                 ctx.strokeRect(xPos, yPos, 160, 160);
 
                 if (tile) {
-                    const props = tile.properties;
                     for (let cy = 0; cy < TILE_H; cy++) {
                         for (let cx = 0; cx < TILE_W; cx++) {
                             const idx = cy * 16 + cx;
                             const char = tile.content[idx];
-                            const colorIdx = (props.color && props.color[idx]) ? props.color[idx] : 0;
-                            const cellProp = (props.cell_props[cy] && props.cell_props[cy][cx]) ? props.cell_props[cy][cx] : null;
-
+                            const colorIdx = tile.properties.color[idx] || 0;
                             const charX = xPos + (cx * CHAR_W);
                             const charY = yPos + (cy * CHAR_H);
 
-                            if (cellProp && cellProp.link) {
+                            // Link underline
+                            const cp = tile.properties.cell_props[cy] && tile.properties.cell_props[cy][cx];
+                            if (cp && cp.link) {
                                 ctx.beginPath();
-                                if (cellProp.link.type === 'url') { ctx.strokeStyle = "blue"; ctx.setLineDash([]); }
-                                else if (cellProp.link.type === 'coord') { ctx.strokeStyle = "green"; ctx.setLineDash([]); }
-                                else { ctx.strokeStyle = "#333"; ctx.setLineDash([2, 2]); }
-                                ctx.moveTo(charX, charY + CHAR_H - 2);
-                                ctx.lineTo(charX + CHAR_W, charY + CHAR_H - 2);
-                                ctx.stroke();
-                                ctx.setLineDash([]);
+                                if (cp.link.type === 'url') { ctx.strokeStyle = "blue"; ctx.setLineDash([]); }
+                                else if (cp.link.type === 'coord') { ctx.strokeStyle = "green"; ctx.setLineDash([]); }
+                                else { ctx.strokeStyle = "#444"; ctx.setLineDash([2, 2]); }
+                                ctx.moveTo(charX, charY + 18); ctx.lineTo(charX + 10, charY + 18);
+                                ctx.stroke(); ctx.setLineDash([]);
                             }
 
-                            if (char && char !== " ") {
-                                ctx.fillStyle = '#' + (PALETTE[colorIdx] || 0).toString(16).padStart(6, '0');
+                            if (char !== " ") {
+                                ctx.fillStyle = '#' + (PALETTE[colorIdx]).toString(16).padStart(6, '0');
                                 ctx.fillText(char, charX, charY);
                             }
                         }
@@ -214,6 +223,7 @@
             }
         }
 
+        // Selection Cursor
         ctx.strokeStyle = "#007bff";
         ctx.lineWidth = 2;
         ctx.strokeRect(selectedCell.tx * 160 + selectedCell.cx * 10 - cameraX, 
@@ -221,15 +231,18 @@
         ctx.lineWidth = 1;
     }
 
-    // --- Input Handling ---
+    // --- Interaction ---
 
-    let isDragging = false;
-    let lastMouse = { x: 0, y: 0 };
-    let tapStart = { x: 0, y: 0 };
-
-    function focusKeyboard() {
-        setTimeout(() => { hiddenInput.focus(); hiddenInput.click(); }, 10);
+    function fetchVisibleTiles() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const minTX = Math.floor(cameraX / 160) - 1;
+        const maxTX = Math.ceil((cameraX + canvas.width) / 160) + 1;
+        const minTY = Math.floor(cameraY / 160) - 1;
+        const maxTY = Math.ceil((cameraY + canvas.height) / 160) + 1;
+        ws.send(JSON.stringify({ kind: "fetch", fetchRectangles: [{ minX: minTX, maxX: maxTX, minY: minTY, maxY: maxTY }], request: "view" }));
     }
+
+    let isDragging = false, lastMouse = { x: 0, y: 0 }, tapStart = { x: 0, y: 0 };
 
     canvas.addEventListener('pointerdown', (e) => {
         isDragging = true;
@@ -256,56 +269,40 @@
             selectedCell.ty = Math.floor(worldY / 160);
             selectedCell.cx = Math.floor((((worldX % 160) + 160) % 160) / 10);
             selectedCell.cy = Math.floor((((worldY % 160) + 160) % 160) / 20);
-            focusKeyboard();
+            setTimeout(() => { hiddenInput.focus(); hiddenInput.click(); }, 10);
             checkLinkAtCursor();
-            render();
         } else {
             fetchVisibleTiles();
         }
         isDragging = false;
+        render();
     });
 
     hiddenInput.addEventListener('input', (e) => {
         const char = e.data || e.target.value.slice(-1);
-        if (char) {
-            ws.send(JSON.stringify({
-                kind: "write",
-                edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), char, Math.random(), currentColor]]
-            }));
-            selectedCell.cx++;
-            if (selectedCell.cx >= 16) { selectedCell.cx = 0; selectedCell.tx++; }
-            render();
-        }
+        if (char) handleWrite(char);
         hiddenInput.value = ""; 
     });
 
     window.addEventListener('keydown', (e) => {
         if (document.activeElement === chatInput) return;
-        if (e.key === "Backspace") {
-            ws.send(JSON.stringify({ kind: "write", edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), " ", Math.random(), currentColor]]}));
-            selectedCell.cx--;
-            if (selectedCell.cx < 0) { selectedCell.cx = 15; selectedCell.tx--; }
-            render();
-        }
+        if (e.key === "Backspace") { handleWrite(" "); selectedCell.cx -= 2; if(selectedCell.cx < 0) { selectedCell.cx = 15; selectedCell.tx--; } render(); }
         if (e.key.startsWith("Arrow")) {
             if (e.key === "ArrowRight") selectedCell.cx++;
             if (e.key === "ArrowLeft") selectedCell.cx--;
             if (e.key === "ArrowUp") selectedCell.cy--;
             if (e.key === "ArrowDown") selectedCell.cy++;
-            checkLinkAtCursor();
             render();
         }
     });
 
-    chatInput.addEventListener('keydown', (e) => {
+    chatInput.addEventListener('keydown', e => {
         if (e.key === 'Enter' && chatInput.value.trim()) {
             processCommand(chatInput.value);
             chatInput.value = "";
             chatInput.blur();
         }
     });
-
-    // --- Link Tools ---
 
     function checkLinkAtCursor() {
         const tile = tiles[`${selectedCell.ty},${selectedCell.tx}`];
@@ -316,47 +313,29 @@
             const display = document.getElementById('link-display');
             const btn = document.getElementById('link-action-btn');
             btn.style.display = 'inline-block';
-
             if (data.link.type === 'url') {
                 display.innerText = data.link.url;
-                btn.onclick = () => window.open(data.link.url.startsWith('http') ? data.link.url : 'http://'+data.link.url, '_blank');
                 btn.innerText = "Open";
+                btn.onclick = () => window.open(data.link.url.startsWith('http') ? data.link.url : 'http://'+data.link.url, '_blank');
             } else if (data.link.type === 'coord') {
-                display.innerText = `${data.link.link_tileX}, ${data.link.link_tileY}`;
-                btn.onclick = () => {
-                    cameraX = (data.link.link_tileX * 160) - (canvas.width / 2);
-                    cameraY = (data.link.link_tileY * 160) - (canvas.height / 2);
-                    fetchVisibleTiles(); render();
-                };
+                display.innerText = `To ${data.link.link_tileX}, ${data.link.link_tileY}`;
                 btn.innerText = "Jump";
-            } else {
-                display.innerText = "Note";
-                btn.style.display = 'none';
-            }
-        } else {
-            ui.style.display = 'none';
-        }
+                btn.onclick = () => { cameraX = data.link.link_tileX*160 - canvas.width/2; cameraY = data.link.link_tileY*160 - canvas.height/2; fetchVisibleTiles(); render(); };
+            } else { display.innerText = "Note"; btn.style.display = 'none'; }
+        } else { ui.style.display = 'none'; }
     }
 
     function promptLink(type) {
-        if (type === 'url') {
-            const url = prompt("URL:");
-            if (url) sendLinkUpdate({ type: 'url', url });
-        } else if (type === 'coord') {
-            const tx = prompt("Tile X:"), ty = prompt("Tile Y:");
-            if (tx !== null) sendLinkUpdate({ type: 'coord', link_tileX: parseInt(tx), link_tileY: parseInt(ty) });
-        } else { sendLinkUpdate({ type: 'note' }); }
+        if (type === 'url') { const url = prompt("URL:"); if (url) sendLinkUpdate({ type: 'url', url }); }
+        else if (type === 'coord') { const tx = prompt("Tile X:"), ty = prompt("Tile Y:"); if (tx) sendLinkUpdate({ type: 'coord', link_tileX: parseInt(tx), link_tileY: parseInt(ty) }); }
+        else sendLinkUpdate({ type: 'note' });
     }
 
     function sendLinkUpdate(ld) {
         ws.send(JSON.stringify({ kind: "link", type: ld.type, tileX: selectedCell.tx, tileY: selectedCell.ty, charX: selectedCell.cx, charY: selectedCell.cy, data: ld }));
     }
 
-    // --- Init ---
-    window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; render(); });
-    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
-    
-    // Build Palette
+    // Init Palette
     const p = document.getElementById('palette');
     PALETTE.forEach((color, i) => {
         const s = document.createElement('div');
@@ -366,12 +345,14 @@
             document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
             s.classList.add('active-color');
             currentColor = i;
-            document.getElementById('current-color-name').innerText = PALETTE_NAMES[i];
+            document.getElementById('cur-col-name').innerText = PALETTE_NAMES[i];
         };
         p.appendChild(s);
     });
 
-    connect(currentServerUrl);
+    window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; render(); });
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    connect(`wss://${location.host}`);
 </script>
 </body>
 </html>
