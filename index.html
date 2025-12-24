@@ -1,1 +1,233 @@
-like i said, no frontend.
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TinyOWOT - Text World</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #eee; font-family: monospace; }
+        #canvas-container { cursor: text; }
+        canvas { display: block; image-rendering: pixelated; }
+        
+        #ui { position: fixed; bottom: 10px; left: 10px; pointer-events: none; }
+        #ui > * { pointer-events: auto; background: rgba(255,255,255,0.8); padding: 5px; margin-top: 5px; border: 1px solid #ccc; }
+        
+        #chat-box { position: fixed; bottom: 10px; right: 10px; width: 300px; height: 200px; display: flex; flex-direction: column; }
+        #messages { flex: 1; overflow-y: auto; font-size: 12px; background: rgba(255,255,255,0.9); }
+        #chat-input { width: 100%; border: 1px solid #ccc; padding: 5px; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="coords">X: 0, Y: 0</div>
+        <div id="status">Connecting...</div>
+    </div>
+
+    <div id="chat-box">
+        <div id="messages"></div>
+        <input type="text" id="chat-input" placeholder="Chat here (Enter)...">
+    </div>
+
+    <canvas id="world"></canvas>
+
+<script>
+    const canvas = document.getElementById('world');
+    const ctx = canvas.getContext('2d');
+    const chatInput = document.getElementById('chat-input');
+    const messages = document.getElementById('messages');
+    
+    // Grid Constants
+    const TILE_W = 16;
+    const TILE_H = 8;
+    const CHAR_W = 10;
+    const CHAR_H = 20;
+
+    let cameraX = 0, cameraY = 0; // In pixels
+    let tiles = {};
+    let cursors = {};
+    let selectedCell = { tx: 0, ty: 0, cx: 0, cy: 0 };
+    let ws;
+
+    // --- Networking ---
+    function connect() {
+        ws = new WebSocket(`ws://${location.host}`);
+        
+        ws.onopen = () => {
+            document.getElementById('status').innerText = "Connected";
+            fetchVisibleTiles();
+        };
+
+        ws.onmessage = (msg) => {
+            const data = JSON.parse(msg.data);
+
+            if (data.kind === "fetch" || data.kind === "tileUpdate") {
+                Object.assign(tiles, data.tiles);
+                render();
+            }
+
+            if (data.kind === "chat") {
+                const div = document.createElement('div');
+                div.textContent = `${data.nickname || data.id}: ${data.message}`;
+                messages.appendChild(div);
+                messages.scrollTop = messages.scrollHeight;
+            }
+
+            if (data.kind === "cursor") {
+                if (data.hidden) delete cursors[data.channel];
+                else cursors[data.channel] = data.position;
+                render();
+            }
+        };
+    }
+
+    function fetchVisibleTiles() {
+        if (ws.readyState !== WebSocket.OPEN) return;
+
+        const minTX = Math.floor((cameraX) / (TILE_W * CHAR_W));
+        const maxTX = Math.floor((cameraX + canvas.width) / (TILE_W * CHAR_W));
+        const minTY = Math.floor((cameraY) / (TILE_H * CHAR_H));
+        const maxTY = Math.floor((cameraY + canvas.height) / (TILE_H * CHAR_H));
+
+        ws.send(JSON.stringify({
+            kind: "fetch",
+            fetchRectangles: [{ minX: minTX, maxX: maxTX, minY: minTY, maxY: maxTY }],
+            request: "view"
+        }));
+    }
+
+    // --- Rendering ---
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.font = `${CHAR_H}px monospace`;
+        ctx.textBaseline = "top";
+
+        const startTX = Math.floor(cameraX / (TILE_W * CHAR_W));
+        const endTX = Math.ceil((cameraX + canvas.width) / (TILE_W * CHAR_W));
+        const startTY = Math.floor(cameraY / (TILE_H * CHAR_H));
+        const endTY = Math.ceil((cameraY + canvas.height) / (TILE_H * CHAR_H));
+
+        for (let ty = startTY; ty <= endTY; ty++) {
+            for (let tx = startTX; tx <= endTX; tx++) {
+                const tile = tiles[`${ty},${tx}`];
+                const xPos = tx * TILE_W * CHAR_W - cameraX;
+                const yPos = ty * TILE_H * CHAR_H - cameraY;
+
+                // Draw background for protected areas
+                if (tile && tile.properties.writability === 2) {
+                    ctx.fillStyle = "#e0e0e0";
+                    ctx.fillRect(xPos, yPos, TILE_W * CHAR_W, TILE_H * CHAR_H);
+                }
+
+                // Draw border for tiles
+                ctx.strokeStyle = "#ddd";
+                ctx.strokeRect(xPos, yPos, TILE_W * CHAR_W, TILE_H * CHAR_H);
+
+                if (tile) {
+                    ctx.fillStyle = "#000";
+                    for (let cy = 0; cy < TILE_H; cy++) {
+                        for (let cx = 0; cx < TILE_W; cx++) {
+                            const char = tile.content[cy * 16 + cx];
+                            if (char !== " ") {
+                                ctx.fillText(char, xPos + (cx * CHAR_W), yPos + (cy * CHAR_H));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draw selection cursor
+        ctx.strokeStyle = "blue";
+        ctx.strokeRect(
+            selectedCell.tx * TILE_W * CHAR_W + selectedCell.cx * CHAR_W - cameraX,
+            selectedCell.ty * TILE_H * CHAR_H + selectedCell.cy * CHAR_H - cameraY,
+            CHAR_W, CHAR_H
+        );
+    }
+
+    // --- Input Handling ---
+    let isDragging = false;
+    let lastMouse = { x: 0, y: 0 };
+
+    window.addEventListener('resize', () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        render();
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (e.button === 0) { // Left click to select
+            const worldX = e.clientX + cameraX;
+            const worldY = e.clientY + cameraY;
+            selectedCell.tx = Math.floor(worldX / (TILE_W * CHAR_W));
+            selectedCell.ty = Math.floor(worldY / (TILE_H * CHAR_H));
+            selectedCell.cx = Math.floor((worldX % (TILE_W * CHAR_W)) / CHAR_W);
+            selectedCell.cy = Math.floor((worldY % (TILE_H * CHAR_H)) / CHAR_H);
+            
+            // Adjust for negative coordinates
+            if (worldX < 0) selectedCell.cx = Math.floor((((worldX % (160)) + 160) % 160) / 10);
+            if (worldY < 0) selectedCell.cy = Math.floor((((worldY % (160)) + 160) % 160) / 20);
+
+            render();
+        }
+        isDragging = true;
+        lastMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (isDragging) {
+            cameraX -= (e.clientX - lastMouse.x);
+            cameraY -= (e.clientY - lastMouse.y);
+            lastMouse = { x: e.clientX, y: e.clientY };
+            document.getElementById('coords').innerText = `X: ${Math.floor(cameraX/10)}, Y: ${Math.floor(cameraY/20)}`;
+            render();
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (isDragging) fetchVisibleTiles();
+        isDragging = false;
+    });
+
+    window.addEventListener('keydown', (e) => {
+        if (document.activeElement === chatInput) {
+            if (e.key === "Enter") {
+                ws.send(JSON.stringify({ kind: "chat", message: chatInput.value, nickname: "User" }));
+                chatInput.value = "";
+                chatInput.blur();
+            }
+            return;
+        }
+
+        if (e.key.length === 1) { // Type text
+            ws.send(JSON.stringify({
+                kind: "write",
+                edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), e.key, Math.random()]]
+            }));
+            
+            // Move cursor forward
+            selectedCell.cx++;
+            if (selectedCell.cx >= 16) {
+                selectedCell.cx = 0;
+                selectedCell.tx++;
+            }
+            render();
+        } else if (e.key === "ArrowRight") selectedCell.cx++;
+        else if (e.key === "ArrowLeft") selectedCell.cx--;
+        else if (e.key === "ArrowUp") selectedCell.cy--;
+        else if (e.key === "ArrowDown") selectedCell.cy++;
+        // (Add logic to wrap tx/ty when cx/cy go out of bounds)
+        render();
+    });
+
+    // Initial Setup
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    connect();
+    
+    // Auto-refresh every now and then
+    setInterval(fetchVisibleTiles, 5000);
+
+</script>
+</body>
+</html>
