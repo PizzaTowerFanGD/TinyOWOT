@@ -50,7 +50,7 @@
 
     // --- Networking ---
     function connect() {
-        ws = new WebSocket(`ws://${location.host}`);
+        ws = new WebSocket(`wss://${location.host}`); // "the S is important", make that the commit name
         
         ws.onopen = () => {
             document.getElementById('status').innerText = "Connected";
