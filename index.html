@@ -5,107 +5,70 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>TinyOWOT</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #f0f0f0; font-family: 'Courier New', monospace; touch-action: none; }
-        canvas { display: block; image-rendering: pixelated; }
-        
-        /* UI Overlay */
-        #ui-layer { position: fixed; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 10; }
-        .panel { pointer-events: auto; background: rgba(255,255,255,0.9); border: 1px solid #999; padding: 5px; margin: 5px; display: inline-block; vertical-align: top; font-size: 13px; }
-        
-        .color-picker { display: flex; gap: 3px; margin-top: 5px; }
-        .color-swatch { width: 18px; height: 18px; border: 1px solid #000; cursor: pointer; }
-        .active-color { outline: 2px solid #007bff; z-index: 1; }
+        body { margin: 0; overflow: hidden; background: #f0f0f0; font-family: monospace; touch-action: none; }
+        canvas { display: block; }
 
-        #chat-panel { position: fixed; bottom: 0; right: 0; width: 250px; max-height: 30%; display: flex; flex-direction: column; }
-        #messages { flex: 1; overflow-y: auto; background: white; font-size: 11px; padding: 5px; }
-        
-        /* Mobile Input Trigger */
-        #hidden-input { position: fixed; left: -1000px; top: -1000px; opacity: 0; }
-        
-        button { cursor: pointer; padding: 4px 8px; font-size: 12px; }
-        input[type="text"] { font-size: 14px; }
+        /* The Secret Sauce: A hidden input that is technically "visible" to the browser */
+        #mobile-input-field {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            opacity: 0;
+            pointer-events: none;
+            z-index: -1;
+            width: 1px;
+            height: 1px;
+            font-size: 16px; /* Prevents iOS from zooming in on focus */
+        }
 
-        /* Coordinate Overlay */
-        #coords { position: fixed; bottom: 5px; left: 5px; font-size: 10px; color: #666; }
+        #ui { position: fixed; top: 10px; left: 10px; background: rgba(255,255,255,0.8); padding: 10px; border: 1px solid #ccc; pointer-events: none; }
+        .kb-status { color: green; font-weight: bold; }
     </style>
 </head>
 <body>
 
-<div id="ui-layer">
-    <div class="panel">
-        <strong>Tools</strong><br>
-        Color: <span id="current-color-hex">#000000</span>
-        <div class="color-picker" id="palette"></div>
-        <div style="margin-top:8px;">
-            <button onclick="promptLink('url')">Add URL</button>
-            <button onclick="promptLink('coord')">Add Coord</button>
-            <button onclick="promptLink('note')">Add Note</button>
-        </div>
+    <div id="ui">
+        Tap anywhere to type<br>
+        <span id="coords">X: 0, Y: 0</span><br>
+        <span id="kb-indicator">Keyboard: Hidden</span>
     </div>
-    
-    <div id="link-info" class="panel" style="display:none; border-color: blue;">
-        <strong>Link found:</strong> <span id="link-display"></span>
-        <button id="link-action-btn">Go</button>
-    </div>
-</div>
 
-<div id="chat-panel" class="panel">
-    <div id="messages"></div>
-    <input type="text" id="chat-input" placeholder="Chat...">
-</div>
+    <!-- This input field is what triggers the virtual keyboard -->
+    <input type="text" id="mobile-input-field" autocomplete="off" autocapitalize="off" spellcheck="false">
 
-<div id="coords">X: 0, Y: 0</div>
-
-<!-- Hidden input allows mobile keyboard to work -->
-<input type="text" id="hidden-input" autocomplete="off" autocapitalize="off">
-
-<canvas id="world"></canvas>
+    <canvas id="world"></canvas>
 
 <script>
     const canvas = document.getElementById('world');
     const ctx = canvas.getContext('2d');
-    const hiddenInput = document.getElementById('hidden-input');
+    const mobileInput = document.getElementById('mobile-input-field');
+    const kbIndicator = document.getElementById('kb-indicator');
     
-    // Config
-    const TILE_W = 16, TILE_H = 8;
-    const CHAR_W = 10, CHAR_H = 20;
-    const PALETTE = [0x000000, 0xff0000, 0x00aa00, 0x0000ff, 0xff00ff, 0x00aaaa, 0x888888, 0xaaaa00];
-
     let cameraX = 0, cameraY = 0;
     let tiles = {};
     let selectedCell = { tx: 0, ty: 0, cx: 0, cy: 0 };
-    let currentColor = 0; // Index in Palette
     let ws;
 
-    // --- Networking ---
+    // Connect to WebSocket
     function connect() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${protocol}//${location.host}`);
-        
         ws.onopen = () => fetchVisibleTiles();
         ws.onmessage = (msg) => {
             const data = JSON.parse(msg.data);
             if (data.kind === "fetch" || data.kind === "tileUpdate") {
                 Object.assign(tiles, data.tiles);
-                checkLinkAtCursor();
                 render();
-            }
-            if (data.kind === "chat") {
-                const m = document.getElementById('messages');
-                m.innerHTML += `<div><b>${data.nickname || 'anon'}:</b> ${data.message}</div>`;
-                m.scrollTop = m.scrollHeight;
             }
         };
     }
 
     function fetchVisibleTiles() {
         if (ws.readyState !== WebSocket.OPEN) return;
-        const margin = 1;
-        const minTX = Math.floor(cameraX / (TILE_W * CHAR_W)) - margin;
-        const maxTX = Math.ceil((cameraX + canvas.width) / (TILE_W * CHAR_W)) + margin;
-        const minTY = Math.floor(cameraY / (TILE_H * CHAR_H)) - margin;
-        const maxTY = Math.ceil((cameraY + canvas.height) / (TILE_H * CHAR_H)) + margin;
-
+        const minTX = Math.floor(cameraX / 160);
+        const maxTX = Math.ceil((cameraX + canvas.width) / 160);
+        const minTY = Math.floor(cameraY / 160);
+        const maxTY = Math.ceil((cameraY + canvas.height) / 160);
         ws.send(JSON.stringify({
             kind: "fetch",
             fetchRectangles: [{ minX: minTX, maxX: maxTX, minY: minTY, maxY: maxTY }],
@@ -113,162 +76,11 @@
         }));
     }
 
-    // --- Rendering Logic ---
-    function intToHex(int) {
-        return '#' + (int).toString(16).padStart(6, '0');
-    }
+    // --- Input Logic ---
 
-    function render() {
-        ctx.fillStyle = "#f0f0f0";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.font = `${CHAR_H}px monospace`;
-        ctx.textBaseline = "top";
-
-        const startTX = Math.floor(cameraX / (160));
-        const endTX = Math.ceil((cameraX + canvas.width) / (160));
-        const startTY = Math.floor(cameraY / (160));
-        const endTY = Math.ceil((cameraY + canvas.height) / (160));
-
-        for (let ty = startTY; ty <= endTY; ty++) {
-            for (let tx = startTX; tx <= endTX; tx++) {
-                const tile = tiles[`${ty},${tx}`];
-                const xPos = tx * 160 - cameraX;
-                const yPos = ty * 160 - cameraY;
-
-                // Protected Area (Gray)
-                if (tile && tile.properties.writability === 2) {
-                    ctx.fillStyle = "#e5e5e5";
-                    ctx.fillRect(xPos, yPos, 160, 160);
-                }
-
-                // Grid Lines
-                ctx.strokeStyle = "#ddd";
-                ctx.strokeRect(xPos, yPos, 160, 160);
-
-                if (tile) {
-                    const props = tile.properties;
-                    for (let cy = 0; cy < TILE_H; cy++) {
-                        for (let cx = 0; cx < TILE_W; cx++) {
-                            const idx = cy * 16 + cx;
-                            const char = tile.content[idx];
-                            const colorIdx = props.color ? props.color[idx] : 0;
-                            const cellProp = (props.cell_props[cy] && props.cell_props[cy][cx]) ? props.cell_props[cy][cx] : null;
-
-                            const charX = xPos + (cx * CHAR_W);
-                            const charY = yPos + (cy * CHAR_H);
-
-                            // Handle Links Decoration
-                            if (cellProp && cellProp.link) {
-                                ctx.beginPath();
-                                if (cellProp.link.type === 'url') {
-                                    ctx.strokeStyle = "blue";
-                                    ctx.setLineDash([]);
-                                } else if (cellProp.link.type === 'coord') {
-                                    ctx.strokeStyle = "green";
-                                    ctx.setLineDash([]);
-                                } else { // Note
-                                    ctx.strokeStyle = "black";
-                                    ctx.setLineDash([2, 2]);
-                                }
-                                ctx.moveTo(charX, charY + CHAR_H - 2);
-                                ctx.lineTo(charX + CHAR_W, charY + CHAR_H - 2);
-                                ctx.stroke();
-                                ctx.setLineDash([]);
-                            }
-
-                            if (char !== " ") {
-                                ctx.fillStyle = intToHex(PALETTE[colorIdx] || 0);
-                                ctx.fillText(char, charX, charY);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Selection Cursor
-        ctx.strokeStyle = "#007bff";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(selectedCell.tx * 160 + selectedCell.cx * 10 - cameraX, 
-                       selectedCell.ty * 160 + selectedCell.cy * 20 - cameraY, 10, 20);
-        ctx.lineWidth = 1;
-    }
-
-    // --- Link Handling ---
-    function checkLinkAtCursor() {
-        const tile = tiles[`${selectedCell.ty},${selectedCell.tx}`];
-        const ui = document.getElementById('link-info');
-        if (tile && tile.properties.cell_props[selectedCell.cy] && tile.properties.cell_props[selectedCell.cy][selectedCell.cx]) {
-            const data = tile.properties.cell_props[selectedCell.cy][selectedCell.cx];
-            ui.style.display = 'inline-block';
-            const display = document.getElementById('link-display');
-            const btn = document.getElementById('link-action-btn');
-
-            if (data.link.type === 'url') {
-                display.innerText = data.link.url;
-                btn.onclick = () => window.open(data.link.url, '_blank');
-                btn.innerText = "Open URL";
-            } else if (data.link.type === 'coord') {
-                display.innerText = `Jump to ${data.link.link_tileX}, ${data.link.link_tileY}`;
-                btn.onclick = () => jumpTo(data.link.link_tileX, data.link.link_tileY);
-                btn.innerText = "Jump";
-            } else {
-                display.innerText = "Note context";
-                btn.style.display = 'none';
-            }
-        } else {
-            ui.style.display = 'none';
-        }
-    }
-
-    function promptLink(type) {
-        if (type === 'url') {
-            const url = prompt("Enter URL (include http://):");
-            if (url) sendLinkUpdate({ type: 'url', url });
-        } else if (type === 'coord') {
-            const tx = prompt("Enter Tile X:");
-            const ty = prompt("Enter Tile Y:");
-            if (tx !== null) sendLinkUpdate({ type: 'coord', link_tileX: parseInt(tx), link_tileY: parseInt(ty) });
-        } else {
-            sendLinkUpdate({ type: 'note' });
-        }
-    }
-
-    function sendLinkUpdate(linkData) {
-        ws.send(JSON.stringify({
-            kind: "link",
-            type: linkData.type,
-            tileX: selectedCell.tx, tileY: selectedCell.ty,
-            charX: selectedCell.cx, charY: selectedCell.cy,
-            data: linkData
-        }));
-    }
-
-    function jumpTo(tx, ty) {
-        cameraX = (tx * 160) - (canvas.width / 2);
-        cameraY = (ty * 160) - (canvas.height / 2);
-        fetchVisibleTiles();
-        render();
-    }
-
-    // --- Input & Mobile ---
-    let isDragging = false;
-    let lastMouse = { x: 0, y: 0 };
-
-    function handleInput(char) {
-        ws.send(JSON.stringify({
-            kind: "write",
-            edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), char, Math.random(), currentColor]]
-        }));
-        selectedCell.cx++;
-        if (selectedCell.cx >= 16) { selectedCell.cx = 0; selectedCell.tx++; }
-        render();
-    }
-
+    // 1. Tapping the canvas
     canvas.addEventListener('pointerdown', (e) => {
-        isDragging = true;
-        lastMouse = { x: e.clientX, y: e.clientY };
-        
+        // Calculate grid position
         const worldX = e.clientX + cameraX;
         const worldY = e.clientY + cameraY;
         selectedCell.tx = Math.floor(worldX / 160);
@@ -276,11 +88,92 @@
         selectedCell.cx = Math.floor((((worldX % 160) + 160) % 160) / 10);
         selectedCell.cy = Math.floor((((worldY % 160) + 160) % 160) / 20);
 
-        hiddenInput.focus(); // Trigger mobile keyboard
-        checkLinkAtCursor();
+        // FORCE KEYBOARD
+        mobileInput.focus();
+        kbIndicator.innerText = "Keyboard: ACTIVE";
+        kbIndicator.classList.add("kb-status");
+
         render();
     });
 
+    // 2. Handling the text input from virtual keyboard
+    mobileInput.addEventListener('input', (e) => {
+        const char = e.data || e.target.value.slice(-1); // Handle different mobile event types
+        if (char) {
+            writeChar(char);
+            e.target.value = ""; // Clear for next character
+        }
+    });
+
+    // Handle Backspace
+    mobileInput.addEventListener('keydown', (e) => {
+        if (e.key === "Backspace") {
+            writeChar(" ");
+        }
+    });
+
+    function writeChar(char) {
+        ws.send(JSON.stringify({
+            kind: "write",
+            edits: [[selectedCell.ty, selectedCell.tx, selectedCell.cy, selectedCell.cx, Date.now(), char, Math.random()]]
+        }));
+        
+        // Advance cursor
+        selectedCell.cx++;
+        if (selectedCell.cx >= 16) {
+            selectedCell.cx = 0;
+            selectedCell.tx++;
+        }
+        render();
+    }
+
+    // --- Rendering Logic ---
+    function render() {
+        ctx.fillStyle = "#f0f0f0";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.font = `20px monospace`;
+        ctx.textBaseline = "top";
+
+        const startTX = Math.floor(cameraX / 160);
+        const endTX = Math.ceil((cameraX + canvas.width) / 160);
+        const startTY = Math.floor(cameraY / 160);
+        const endTY = Math.ceil((cameraY + canvas.height) / 160);
+
+        for (let ty = startTY; ty <= endTY; ty++) {
+            for (let tx = startTX; tx <= endTX; tx++) {
+                const tile = tiles[`${ty},${tx}`];
+                const xPos = tx * 160 - cameraX;
+                const yPos = ty * 160 - cameraY;
+
+                ctx.strokeStyle = "#ddd";
+                ctx.strokeRect(xPos, yPos, 160, 160);
+
+                if (tile) {
+                    ctx.fillStyle = "#000";
+                    for (let i = 0; i < 128; i++) {
+                        const cx = i % 16;
+                        const cy = Math.floor(i / 16);
+                        const char = tile.content[i];
+                        if (char !== " ") {
+                            ctx.fillText(char, xPos + (cx * 10), yPos + (cy * 20));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draw selection cursor
+        ctx.strokeStyle = "blue";
+        ctx.strokeRect(
+            selectedCell.tx * 160 + selectedCell.cx * 10 - cameraX,
+            selectedCell.ty * 160 + selectedCell.cy * 20 - cameraY,
+            10, 20
+        );
+    }
+
+    // Dragging Logic
+    let isDragging = false;
+    let lastMouse = { x: 0, y: 0 };
     window.addEventListener('pointermove', (e) => {
         if (isDragging) {
             cameraX -= (e.clientX - lastMouse.x);
@@ -290,63 +183,18 @@
             render();
         }
     });
+    window.addEventListener('pointerdown', (e) => { isDragging = true; lastMouse = { x: e.clientX, y: e.clientY }; });
+    window.addEventListener('pointerup', () => { isDragging = false; fetchVisibleTiles(); });
 
-    window.addEventListener('pointerup', () => {
-        if (isDragging) fetchVisibleTiles();
-        isDragging = false;
-    });
-
-    hiddenInput.addEventListener('input', (e) => {
-        const char = e.target.value.slice(-1);
-        if (char) handleInput(char);
-        e.target.value = ""; 
-    });
-
-    window.addEventListener('keydown', (e) => {
-        if (e.key === "Backspace") { handleInput(" "); }
-        if (e.key.startsWith("Arrow")) {
-            if (e.key === "ArrowRight") selectedCell.cx++;
-            if (e.key === "ArrowLeft") selectedCell.cx--;
-            if (e.key === "ArrowUp") selectedCell.cy--;
-            if (e.key === "ArrowDown") selectedCell.cy++;
-            checkLinkAtCursor();
-            render();
-        }
-    });
-
-    // --- Init ---
-    function initPalette() {
-        const p = document.getElementById('palette');
-        PALETTE.forEach((color, i) => {
-            const s = document.createElement('div');
-            s.className = 'color-swatch' + (i === 0 ? ' active-color' : '');
-            s.style.backgroundColor = intToHex(color);
-            s.onclick = () => {
-                document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
-                s.classList.add('active-color');
-                currentColor = i;
-                document.getElementById('current-color-hex').innerText = intToHex(color);
-            };
-            p.appendChild(s);
-        });
-    }
-
+    // Resize handling
     window.addEventListener('resize', () => {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
         render();
     });
 
-    document.getElementById('chat-input').addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-            ws.send(JSON.stringify({ kind: "chat", message: e.target.value }));
-            e.target.value = "";
-        }
-    });
-
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
-    initPalette();
     connect();
 </script>
 </body>
