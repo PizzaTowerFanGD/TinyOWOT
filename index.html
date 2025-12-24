@@ -107,7 +107,7 @@
     function addChatMessage(sender, text, className = "") {
         const div = document.createElement('div');
         if(className) div.className = className;
-        div.innerHTML = `<b>${sender}:</b> ${text}`;
+        div.innerHTML = `<b>${sender}:</b> ${text.replaceAll("<","").replaceAll(">","")}`;
         msgBox.appendChild(div);
         msgBox.scrollTop = msgBox.scrollHeight;
     }
