@@ -7,48 +7,49 @@ const LOCAL_PORT = 8080;
 const REMOTE_OWOT_URL = 'wss://www.ourworldoftext.com/ws/?hide=1';
 const REMOTE_ORIGIN = 'https://www.ourworldoftext.com';
 
+// Loads token from environment (e.g., UVIAS_TOKEN="..." node server.js)
+const UVIASTOKEN = process.env.UVIAS_TOKEN; 
+
+// The identity shown ONLY on your local server for relayed messages
+const FAKE_SYSTEM_USER = 'GlobalRelay'; 
+
+if (!UVIASTOKEN) {
+    console.error("====================================================");
+    console.error("ERROR: UVIAS_TOKEN environment variable is not set!");
+    console.error("Please run the server with your token like this:");
+    console.error('UVIAS_TOKEN="your_token_here" node server.js');
+    console.error("====================================================");
+    process.exit(1);
+}
+
 const tiles = {}; 
 const clients = new Set();
 let owotBot = null;
 
 /**
- * LOCAL TILE LOGIC
- * Initializes a tile with protection levels based on location.
+ * TILE SYSTEM
  */
 function getOrInitTile(tx, ty) {
     const key = `${ty},${tx}`;
     if (tiles[key]) return tiles[key];
-
     const inArea = (tx >= -2 && tx <= 1 && ty >= -2 && ty <= 1);
     const inHollow = (tx >= -1 && tx <= 0 && ty >= -1 && ty <= 0);
-
-    // 2 = Owner-only (Gray), 0 = Public (White)
     let writability = (inArea && !inHollow) ? 2 : 0;
-
     tiles[key] = {
         content: " ".repeat(128),
-        properties: {
-            writability: writability,
-            color: new Array(128).fill(0),
-            cell_props: {}
-        }
+        properties: { writability, color: new Array(128).fill(0), cell_props: {} }
     };
     return tiles[key];
 }
 
-/**
- * HELPER: Write text to local tiles
- */
 function writeText(startX, startY, startCX, startCY, text) {
     for (let i = 0; i < text.length; i++) {
-        let globalCharX = (startX * 16) + startCX + i;
-        let globalCharY = (startY * 8) + startCY;
-
-        let tx = Math.floor(globalCharX / 16);
-        let ty = Math.floor(globalCharY / 8);
-        let cx = globalCharX - (tx * 16);
-        let cy = globalCharY - (ty * 8);
-
+        let gx = (startX * 16) + startCX + i;
+        let gy = (startY * 8) + startCY;
+        let tx = Math.floor(gx / 16);
+        let ty = Math.floor(gy / 8);
+        let cx = gx - (tx * 16);
+        let cy = gy - (ty * 8);
         const tile = getOrInitTile(tx, ty);
         let contentArr = tile.content.split('');
         contentArr[cy * 16 + cx] = text[i];
@@ -56,47 +57,37 @@ function writeText(startX, startY, startCX, startCY, text) {
     }
 }
 
-// Initial Spawn Area Setup
 writeText(-1, -2, 6, 4, "Welcome to TinyOWOT!");
 writeText(-1, -1, 7, 4, "Square of Publicity");
 
 /**
- * HTTP SERVER
- * Serves the index.html file to your browser
+ * LOCAL WEB SERVER
  */
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    try {
-        res.end(fs.readFileSync('index.html'));
-    } catch (e) {
-        res.end("Error: index.html not found. Please ensure the client code is saved as index.html.");
-    }
+    try { res.end(fs.readFileSync('index.html')); } catch (e) { res.end("Missing index.html"); }
 });
 
-/**
- * LOCAL WEBSOCKET SERVER
- * Handles connections from your browser
- */
 const wss = new WebSocket.Server({ server });
 
 function broadcastLocal(data, skipWs = null) {
     const msg = JSON.stringify(data);
-    clients.forEach(c => { 
-        if (c !== skipWs && c.readyState === WebSocket.OPEN) c.send(msg); 
-    });
+    clients.forEach(c => { if (c !== skipWs && c.readyState === WebSocket.OPEN) c.send(msg); });
 }
 
+/**
+ * LOCAL WSS HANDLER
+ */
 wss.on('connection', (ws) => {
     clients.add(ws);
     ws.id = Math.floor(Math.random() * 10000);
-    
-    // Send initial channel info
     ws.send(JSON.stringify({ kind: "channel", sender: ws.id, initial_user_count: clients.size }));
 
     ws.on('message', (message) => {
         let data;
         try { data = JSON.parse(message); } catch(e) { return; }
 
+        // Handle Tile Requests
         if (data.kind === "fetch") {
             const responseTiles = {};
             data.fetchRectangles.forEach(rect => {
@@ -109,22 +100,17 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ kind: "fetch", tiles: responseTiles, request: data.request }));
         }
 
+        // Handle Writing
         if (data.kind === "write") {
             const accepted = [], rejected = {}, tileUpdates = {};
             data.edits.forEach(edit => {
                 const [y, x, charY, charX, time, char, id, color] = edit;
                 const tile = getOrInitTile(x, y);
-
-                if (tile.properties.writability === 2) {
-                    rejected[id] = 1; 
-                    return;
-                }
-
+                if (tile.properties.writability === 2) { rejected[id] = 1; return; }
                 let contentArr = tile.content.split('');
                 contentArr[charY * 16 + charX] = char;
                 tile.content = contentArr.join('');
                 if (color !== undefined) tile.properties.color[charY * 16 + charX] = color;
-                
                 accepted.push(id);
                 tileUpdates[`${y},${x}`] = tile;
             });
@@ -132,18 +118,18 @@ wss.on('connection', (ws) => {
             if (Object.keys(tileUpdates).length > 0) broadcastLocal({ kind: "tileUpdate", tiles: tileUpdates }, ws);
         }
 
+        // Handle Chat
         if (data.kind === "chat") {
-            // 1. Send to all local clients
             broadcastLocal({
                 kind: "chat", nickname: data.nickname, message: data.message,
                 id: ws.id, color: data.color, location: data.location, date: Date.now()
             });
 
-            // 2. RELAY TO REAL OWOT: The bot repeats what local users say
+            // RELAY TO OFFICIAL OWOT (with loop prevention prefix [L])
             if (owotBot && owotBot.readyState === WebSocket.OPEN) {
                 owotBot.send(JSON.stringify({
                     kind: "chat",
-                    nickname: `[Local] ${data.nickname || 'Anon'}`,
+                    nickname: `[L] ${data.nickname || 'Anon'}`, 
                     message: data.message,
                     location: "page"
                 }));
@@ -162,77 +148,62 @@ wss.on('connection', (ws) => {
 });
 
 /**
- * REMOTE BOT LOGIC
- * Connects to the official OurWorldOfText as a client
+ * REMOTE BOT CLIENT (OWOT SIDE)
  */
 function connectToRemoteOWOT() {
-    console.log(`[Bot] Attempting to connect to ${REMOTE_OWOT_URL}...`);
+    console.log(`[Bot] Authenticating with remote server...`);
 
-    // The Origin header is required by official OWOT to prevent unauthorized bots
     owotBot = new WebSocket(REMOTE_OWOT_URL, {
         origin: REMOTE_ORIGIN,
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+        headers: { 
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Cookie': `uvias=${UVIASTOKEN}`
         }
     });
 
     owotBot.on('open', () => {
-        console.log("[Bot] Connected to official OurWorldOfText!");
-        
-        // Let people on the real site know the bot is there
-        owotBot.send(JSON.stringify({
-            kind: "chat",
-            nickname: "TinyServerBot",
-            message: "TinyOWOT relay active.",
-            location: "page"
-        }));
-
-        // Send a boundary so the official server sends us live updates for the center area
-        owotBot.send(JSON.stringify({
-            kind: "boundary",
-            centerX: 0, centerY: 0,
-            minX: -10, minY: -10, maxX: 10, maxY: 10
-        }));
+        console.log("[Bot] Logged in and Connected to OurWorldOfText!");
+        // Set boundary to receive center updates
+        owotBot.send(JSON.stringify({ kind: "boundary", centerX: 0, centerY: 0, minX: -10, minY: -10, maxX: 10, maxY: 10 }));
     });
 
     owotBot.on('message', (message) => {
         let data;
         try { data = JSON.parse(message); } catch(e) { return; }
 
-        // RELAY FROM REAL OWOT TO LOCAL:
-        // When someone chats on the real main page, display it in the local server
         if (data.kind === "chat") {
+            // LOOP PREVENTION: Ignore if message starts with our prefix
+            if (data.nickname && data.nickname.startsWith('[L]')) return;
+
+            // RELAY TO TINYOWOT (The local side)
             broadcastLocal({
                 kind: "chat",
-                nickname: `[Global] ${data.nickname || 'Anon'}`,
+                nickname: data.nickname || 'Anon',
                 message: data.message,
-                id: 8888, // Custom ID for remote users
-                color: "#ff0000",
+                // These metadata fields fake the identity in your provided client code
+                realUsername: FAKE_SYSTEM_USER, 
+                registered: true,
+                op: true, // Gives it the blue (OP) tag
+                id: 8888, // Constant ID for global users
+                color: data.color || "#00ffff",
                 location: "page",
                 date: Date.now()
             });
         }
         
-        // Keep-alive/Ping handling
         if (data.kind === "ping") {
             owotBot.send(JSON.stringify({ kind: "ping", id: data.id }));
         }
     });
 
     owotBot.on('close', () => {
-        console.log("[Bot] Connection to remote OWOT lost. Reconnecting in 10s...");
+        console.log("[Bot] Reconnecting in 10s...");
         setTimeout(connectToRemoteOWOT, 10000);
     });
 
-    owotBot.on('error', (err) => {
-        console.error("[Bot] WebSocket Error:", err.message);
-    });
+    owotBot.on('error', (err) => console.error("[Bot] Error:", err.message));
 }
 
-// Start the bot connection
+// Start everything
 connectToRemoteOWOT();
-
-// Start the local server
-server.listen(LOCAL_PORT, () => {
-    console.log(`TinyOWOT Server running at http://localhost:${LOCAL_PORT}`);
-});
+server.listen(LOCAL_PORT, () => console.log(`TinyOWOT local server: http://localhost:${LOCAL_PORT}`));
