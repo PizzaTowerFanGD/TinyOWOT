@@ -183,7 +183,7 @@ function connectToRemoteOWOT() {
             if (data.nickname && data.nickname.startsWith('[L]')) return;
             broadcastLocal({
                 kind: "chat", nickname: data.nickname || 'Anon', message: data.message,
-                realUsername: FAKE_SYSTEM_USER, registered: true, op: true, id: 8888,
+                realUsername: FAKE_SYSTEM_USER, registered: true, op: false, id: 1e420,
                 color: data.color || "#00ffff", location: "page", date: Date.now()
             });
         }
