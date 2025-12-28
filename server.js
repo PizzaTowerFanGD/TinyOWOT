@@ -4,7 +4,9 @@ const WebSocket = require('ws');
 const querystring = require('querystring');
 
 // --- CONFIGURATION ---
-const LOCAL_PORT = 8080;
+// FIX: Use Render's assigned port, fallback to 8080 for local testing
+const LOCAL_PORT = process.env.PORT || 8080; 
+
 const REMOTE_OWOT_URL = 'wss://www.ourworldoftext.com/ws/?hide=1';
 const REMOTE_ORIGIN = 'https://www.ourworldoftext.com';
 
@@ -12,10 +14,6 @@ const REMOTE_ORIGIN = 'https://www.ourworldoftext.com';
 const UVIAS_TOKEN = process.env.UVIAS_TOKEN || "";
 const CSRF_TOKEN = process.env.CSRF_TOKEN || "default_middleware_token"; 
 const CSRF_COOKIE_TOKEN = process.env.CSRF_COOKIE_TOKEN || "default_cookie_token";
-
-if (!UVIAS_TOKEN) {
-    console.warn("WARNING: UVIAS_TOKEN is not set. Bot will connect as Guest.");
-}
 
 const FAKE_SYSTEM_USER = 'GlobalRelay';
 const CSRF_INPUT_TAG = `<input type="hidden" name="csrfmiddlewaretoken" value="${CSRF_TOKEN}">`;
@@ -30,11 +28,9 @@ let owotBot = null;
 function getOrInitTile(tx, ty) {
     const key = `${ty},${tx}`;
     if (tiles[key]) return tiles[key];
-
     const inArea = (tx >= -2 && tx <= 1 && ty >= -2 && ty <= 1);
     const inHollow = (tx >= -1 && tx <= 0 && ty >= -1 && ty <= 0);
     let writability = (inArea && !inHollow) ? 2 : 0;
-
     tiles[key] = {
         content: " ".repeat(128),
         properties: {
@@ -48,10 +44,9 @@ function getOrInitTile(tx, ty) {
 }
 
 /**
- * HTTP SERVER (With Middleware)
+ * HTTP SERVER
  */
 const server = http.createServer((req, res) => {
-    // Handle HTML Delivery
     if (req.method === 'GET') {
         res.writeHead(200, { 
             'Content-Type': 'text/html',
@@ -60,7 +55,6 @@ const server = http.createServer((req, res) => {
         
         try {
             let html = fs.readFileSync('index.html').toString();
-            // Safer injection: Find body tag even if it has attributes
             if (html.includes('<body')) {
                 html = html.replace(/(<body[^>]*>)/i, `$1\n    ${CSRF_INPUT_TAG}`);
             } else {
@@ -68,12 +62,11 @@ const server = http.createServer((req, res) => {
             }
             res.end(html);
         } catch (e) {
-            res.end("Error: index.html not found in server directory.");
+            res.end("Error: index.html not found. Ensure it is in the same folder as server.js");
         }
         return;
     }
 
-    // Handle AJAX/POST CSRF Validation
     if (req.method === 'POST') {
         let body = '';
         req.on('data', chunk => { body += chunk.toString(); });
@@ -133,15 +126,12 @@ wss.on('connection', (ws) => {
                 const [tileY, tileX, charY, charX, time, char, id, color, bgcolor] = edit;
                 const tile = getOrInitTile(tileX, tileY);
                 if (tile.properties.writability === 2) { rejected[id] = 1; return; }
-
                 const idx = charY * 16 + charX;
                 let contentArr = tile.content.split('');
                 contentArr[idx] = char;
                 tile.content = contentArr.join('');
-
                 if (color !== undefined) tile.properties.color[idx] = color;
                 if (bgcolor !== undefined) tile.properties.bgcolor[idx] = bgcolor;
-
                 accepted.push(id);
                 tileUpdates[`${tileY},${tileX}`] = tile;
             });
@@ -189,7 +179,6 @@ function connectToRemoteOWOT() {
     owotBot.on('message', (message) => {
         let data;
         try { data = JSON.parse(message); } catch(e) { return; }
-
         if (data.kind === "chat") {
             if (data.nickname && data.nickname.startsWith('[L]')) return;
             broadcastLocal({
@@ -202,11 +191,13 @@ function connectToRemoteOWOT() {
     });
 
     owotBot.on('close', () => setTimeout(connectToRemoteOWOT, 10000));
-    owotBot.on('error', (e) => console.error("[Bot Error]", e.message));
 }
 
-// Global process error handling (Prevents 502 crash)
-process.on('uncaughtException', (err) => { console.error('CRITICAL ERROR:', err); });
+// Ensure the server listens on 0.0.0.0 so Render can see it
+server.listen(LOCAL_PORT, "0.0.0.0", () => {
+    console.log(`Server listening on port ${LOCAL_PORT}`);
+});
 
 connectToRemoteOWOT();
-server.listen(LOCAL_PORT, () => console.log(`TinyOWOT running on port ${LOCAL_PORT}`));
+
+process.on('uncaughtException', (err) => { console.error('Error:', err); });
