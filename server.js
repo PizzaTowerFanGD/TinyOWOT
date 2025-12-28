@@ -8,18 +8,16 @@ const LOCAL_PORT = 8080;
 const REMOTE_OWOT_URL = 'wss://www.ourworldoftext.com/ws/?hide=1';
 const REMOTE_ORIGIN = 'https://www.ourworldoftext.com';
 
-// 1. Environment Variables
-const UVIAS_TOKEN = process.env.UVIAS_TOKEN;
-const CSRF_TOKEN = process.env.CSRF_TOKEN;             // Middleware validation token
-const CSRF_COOKIE_TOKEN = process.env.CSRF_COOKIE_TOKEN; // Browser cookie value
+// 1. Load Credentials Safely
+const UVIAS_TOKEN = process.env.UVIAS_TOKEN || "";
+const CSRF_TOKEN = process.env.CSRF_TOKEN || "default_middleware_token"; 
+const CSRF_COOKIE_TOKEN = process.env.CSRF_COOKIE_TOKEN || "default_cookie_token";
 
-const FAKE_SYSTEM_USER = 'GlobalRelay';
-
-if (!UVIAS_TOKEN || !CSRF_TOKEN || !CSRF_COOKIE_TOKEN) {
-    console.error("ERROR: Missing Environment Variables (UVIAS_TOKEN, CSRF_TOKEN, CSRF_COOKIE_TOKEN)");
-    process.exit(1);
+if (!UVIAS_TOKEN) {
+    console.warn("WARNING: UVIAS_TOKEN is not set. Bot will connect as Guest.");
 }
 
+const FAKE_SYSTEM_USER = 'GlobalRelay';
 const CSRF_INPUT_TAG = `<input type="hidden" name="csrfmiddlewaretoken" value="${CSRF_TOKEN}">`;
 
 const tiles = {}; 
@@ -27,7 +25,7 @@ const clients = new Set();
 let owotBot = null;
 
 /**
- * TILE SYSTEM
+ * TILE LOGIC
  */
 function getOrInitTile(tx, ty) {
     const key = `${ty},${tx}`;
@@ -35,8 +33,6 @@ function getOrInitTile(tx, ty) {
 
     const inArea = (tx >= -2 && tx <= 1 && ty >= -2 && ty <= 1);
     const inHollow = (tx >= -1 && tx <= 0 && ty >= -1 && ty <= 0);
-
-    // 2 = Owner-only (Gray), 0 = Public (White)
     let writability = (inArea && !inHollow) ? 2 : 0;
 
     tiles[key] = {
@@ -52,22 +48,32 @@ function getOrInitTile(tx, ty) {
 }
 
 /**
- * WEB SERVER (CSRF Middleware)
+ * HTTP SERVER (With Middleware)
  */
 const server = http.createServer((req, res) => {
+    // Handle HTML Delivery
     if (req.method === 'GET') {
         res.writeHead(200, { 
             'Content-Type': 'text/html',
             'Set-Cookie': `csrftoken=${CSRF_COOKIE_TOKEN}; Path=/; SameSite=Lax` 
         });
+        
         try {
             let html = fs.readFileSync('index.html').toString();
-            html = html.replace('<body>', `<body>\n    ${CSRF_INPUT_TAG}`);
+            // Safer injection: Find body tag even if it has attributes
+            if (html.includes('<body')) {
+                html = html.replace(/(<body[^>]*>)/i, `$1\n    ${CSRF_INPUT_TAG}`);
+            } else {
+                html = CSRF_INPUT_TAG + html;
+            }
             res.end(html);
-        } catch (e) { res.end("index.html missing."); }
+        } catch (e) {
+            res.end("Error: index.html not found in server directory.");
+        }
         return;
     }
 
+    // Handle AJAX/POST CSRF Validation
     if (req.method === 'POST') {
         let body = '';
         req.on('data', chunk => { body += chunk.toString(); });
@@ -79,7 +85,7 @@ const server = http.createServer((req, res) => {
                 res.end(JSON.stringify({ status: "ok" }));
             } else {
                 res.writeHead(403);
-                res.end("CSRF Fail");
+                res.end("Forbidden: CSRF Invalid");
             }
         });
         return;
@@ -87,13 +93,17 @@ const server = http.createServer((req, res) => {
 });
 
 /**
- * LOCAL WEBSOCKET SERVER
+ * WEBSOCKET SERVER
  */
 const wss = new WebSocket.Server({ server });
 
 function broadcastLocal(data, skipWs = null) {
     const msg = JSON.stringify(data);
-    clients.forEach(c => { if (c !== skipWs && c.readyState === WebSocket.OPEN) c.send(msg); });
+    clients.forEach(c => { 
+        if (c !== skipWs && c.readyState === WebSocket.OPEN) {
+            try { c.send(msg); } catch(e) {}
+        }
+    });
 }
 
 wss.on('connection', (ws) => {
@@ -105,7 +115,6 @@ wss.on('connection', (ws) => {
         let data;
         try { data = JSON.parse(message); } catch(e) { return; }
 
-        // --- FETCH TILES ---
         if (data.kind === "fetch") {
             const responseTiles = {};
             data.fetchRectangles.forEach(rect => {
@@ -118,59 +127,36 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ kind: "fetch", tiles: responseTiles, request: data.request }));
         }
 
-        // --- WRITING SYSTEM (Keystrokes) ---
         if (data.kind === "write") {
-            const accepted = [];
-            const rejected = {};
-            const tileUpdates = {};
-
+            const accepted = [], rejected = {}, tileUpdates = {};
             data.edits.forEach(edit => {
-                // Edit format: [tileY, tileX, charY, charX, time, char, id, color, bgcolor]
-                const [tileY, tileX, charY, charX, timestamp, char, editId, color, bgcolor] = edit;
+                const [tileY, tileX, charY, charX, time, char, id, color, bgcolor] = edit;
                 const tile = getOrInitTile(tileX, tileY);
+                if (tile.properties.writability === 2) { rejected[id] = 1; return; }
 
-                // Check Permissions (writability 2 = Owner Only)
-                if (tile.properties.writability === 2) {
-                    rejected[editId] = 1; // 1 = No permission
-                    return;
-                }
-
-                // Update Character Content
-                const charIndex = charY * 16 + charX;
+                const idx = charY * 16 + charX;
                 let contentArr = tile.content.split('');
-                contentArr[charIndex] = char;
+                contentArr[idx] = char;
                 tile.content = contentArr.join('');
 
-                // Update Colors
-                if (color !== undefined) tile.properties.color[charIndex] = color;
-                if (bgcolor !== undefined) tile.properties.bgcolor[charIndex] = bgcolor;
+                if (color !== undefined) tile.properties.color[idx] = color;
+                if (bgcolor !== undefined) tile.properties.bgcolor[idx] = bgcolor;
 
-                accepted.push(editId);
+                accepted.push(id);
                 tileUpdates[`${tileY},${tileX}`] = tile;
             });
-
-            // 1. Confirm to the user who wrote it
             ws.send(JSON.stringify({ kind: "write", accepted, rejected, request: data.request }));
-
-            // 2. Broadcast the change to everyone else so it shows up live
-            if (Object.keys(tileUpdates).length > 0) {
-                broadcastLocal({ kind: "tileUpdate", tiles: tileUpdates }, ws);
-            }
+            if (Object.keys(tileUpdates).length > 0) broadcastLocal({ kind: "tileUpdate", tiles: tileUpdates }, ws);
         }
 
-        // --- CHAT SYSTEM ---
         if (data.kind === "chat") {
             broadcastLocal({
                 kind: "chat", nickname: data.nickname, message: data.message,
                 id: ws.id, color: data.color, location: data.location, date: Date.now()
             });
-
             if (owotBot && owotBot.readyState === WebSocket.OPEN) {
                 owotBot.send(JSON.stringify({
-                    kind: "chat",
-                    nickname: `[L] ${data.nickname || 'Anon'}`, 
-                    message: data.message,
-                    location: "page"
+                    kind: "chat", nickname: `[L] ${data.nickname || 'Anon'}`, message: data.message, location: "page"
                 }));
             }
         }
@@ -187,22 +173,17 @@ wss.on('connection', (ws) => {
 });
 
 /**
- * BOT CLIENT (Official OWOT side)
+ * BOT CLIENT
  */
 function connectToRemoteOWOT() {
-    console.log(`[Bot] Connecting to Official OWOT...`);
+    const headers = { 'User-Agent': 'Mozilla/5.0', 'Origin': REMOTE_ORIGIN };
+    if (UVIAS_TOKEN) headers['Cookie'] = `uvias=${UVIAS_TOKEN}; csrftoken=${CSRF_COOKIE_TOKEN}`;
 
-    owotBot = new WebSocket(REMOTE_OWOT_URL, {
-        origin: REMOTE_ORIGIN,
-        headers: { 
-            'User-Agent': 'Mozilla/5.0',
-            'Cookie': `uvias=${UVIAS_TOKEN}; csrftoken=${CSRF_COOKIE_TOKEN}`
-        }
-    });
+    owotBot = new WebSocket(REMOTE_OWOT_URL, { headers });
 
     owotBot.on('open', () => {
-        console.log("[Bot] Authenticated and Connected!");
-        owotBot.send(JSON.stringify({ kind: "boundary", centerX: 0, centerY: 0, minX: -10, minY: -10, maxX: 10, maxY: 10 }));
+        console.log("[Bot] Connected to OWOT");
+        owotBot.send(JSON.stringify({ kind: "boundary", centerX: 0, centerY: 0, minX: -5, minY: -5, maxX: 5, maxY: 5 }));
     });
 
     owotBot.on('message', (message) => {
@@ -212,26 +193,20 @@ function connectToRemoteOWOT() {
         if (data.kind === "chat") {
             if (data.nickname && data.nickname.startsWith('[L]')) return;
             broadcastLocal({
-                kind: "chat",
-                nickname: data.nickname || 'Anon',
-                message: data.message,
-                realUsername: FAKE_SYSTEM_USER, 
-                registered: true,
-                op: true,
-                id: 8888,
-                color: data.color || "#00ffff",
-                location: "page",
-                date: Date.now()
+                kind: "chat", nickname: data.nickname || 'Anon', message: data.message,
+                realUsername: FAKE_SYSTEM_USER, registered: true, op: true, id: 8888,
+                color: data.color || "#00ffff", location: "page", date: Date.now()
             });
         }
-        
-        if (data.kind === "ping") {
-            owotBot.send(JSON.stringify({ kind: "ping", id: data.id }));
-        }
+        if (data.kind === "ping") owotBot.send(JSON.stringify({ kind: "ping", id: data.id }));
     });
 
     owotBot.on('close', () => setTimeout(connectToRemoteOWOT, 10000));
+    owotBot.on('error', (e) => console.error("[Bot Error]", e.message));
 }
 
+// Global process error handling (Prevents 502 crash)
+process.on('uncaughtException', (err) => { console.error('CRITICAL ERROR:', err); });
+
 connectToRemoteOWOT();
-server.listen(LOCAL_PORT, () => console.log(`TinyOWOT running at http://localhost:${LOCAL_PORT}`));
+server.listen(LOCAL_PORT, () => console.log(`TinyOWOT running on port ${LOCAL_PORT}`));
