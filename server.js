@@ -2,9 +2,9 @@ const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws');
 const querystring = require('querystring');
+const url = require('url'); // Added for path parsing
 
 // --- CONFIGURATION ---
-// FIX: Use Render's assigned port, fallback to 8080 for local testing
 const LOCAL_PORT = process.env.PORT || 8080; 
 
 const REMOTE_OWOT_URL = 'wss://www.ourworldoftext.com/ws/?hide=1';
@@ -62,7 +62,7 @@ const server = http.createServer((req, res) => {
             }
             res.end(html);
         } catch (e) {
-            res.end("Error: index.html not found. Ensure it is in the same folder as server.js");
+            res.end("Error: index.html not found.");
         }
         return;
     }
@@ -86,10 +86,68 @@ const server = http.createServer((req, res) => {
 });
 
 /**
- * WEBSOCKET SERVER
+ * WEBSOCKET SERVERS
  */
-const wss = new WebSocket.Server({ server });
+// Create two separate WS servers: one for local, one for the proxy
+const wss = new WebSocket.Server({ noServer: true });
+const proxyWss = new WebSocket.Server({ noServer: true });
 
+// Listen for the upgrade event to route to the correct WS server
+server.on('upgrade', (request, socket, head) => {
+    const pathname = url.parse(request.url).pathname;
+
+    if (pathname === '/owotproxy') {
+        proxyWss.handleUpgrade(request, socket, head, (ws) => {
+            proxyWss.emit('connection', ws, request);
+        });
+    } else {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            wss.emit('connection', ws, request);
+        });
+    }
+});
+
+/**
+ * PROXY LOGIC (Endpoint: /owotproxy)
+ */
+proxyWss.on('connection', (clientWs) => {
+    console.log("[Proxy] New client connected to proxy");
+
+    const headers = { 
+        'User-Agent': 'Mozilla/5.0', 
+        'Origin': REMOTE_ORIGIN 
+    };
+    if (UVIAS_TOKEN) {
+        headers['Cookie'] = `uvias=${UVIAS_TOKEN}; csrftoken=${CSRF_COOKIE_TOKEN}`;
+    }
+
+    // Connect to the real OWOT
+    const remoteWs = new WebSocket(REMOTE_OWOT_URL, { headers });
+
+    // Client -> Remote
+    clientWs.on('message', (data) => {
+        if (remoteWs.readyState === WebSocket.OPEN) {
+            remoteWs.send(data);
+        }
+    });
+
+    // Remote -> Client
+    remoteWs.on('message', (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(data);
+        }
+    });
+
+    // Cleanup
+    remoteWs.on('close', () => clientWs.close());
+    clientWs.on('close', () => remoteWs.close());
+    remoteWs.on('error', (e) => console.error("[Proxy Remote Error]", e));
+    clientWs.on('error', (e) => console.error("[Proxy Client Error]", e));
+});
+
+/**
+ * LOCAL WS LOGIC (Main functionality)
+ */
 function broadcastLocal(data, skipWs = null) {
     const msg = JSON.stringify(data);
     clients.forEach(c => { 
@@ -163,7 +221,7 @@ wss.on('connection', (ws) => {
 });
 
 /**
- * BOT CLIENT
+ * BOT CLIENT (Background connection)
  */
 function connectToRemoteOWOT() {
     const headers = { 'User-Agent': 'Mozilla/5.0', 'Origin': REMOTE_ORIGIN };
@@ -193,7 +251,6 @@ function connectToRemoteOWOT() {
     owotBot.on('close', () => setTimeout(connectToRemoteOWOT, 10000));
 }
 
-// Ensure the server listens on 0.0.0.0 so Render can see it
 server.listen(LOCAL_PORT, "0.0.0.0", () => {
     console.log(`Server listening on port ${LOCAL_PORT}`);
 });
