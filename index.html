@@ -35,6 +35,10 @@
         <strong>Tools</strong><br>
         Color: <span id="cur-col-name">Black</span>
         <div class="color-picker" id="palette"></div>
+        <div style="margin-top:5px;">
+            <label style="font-size: 11px;">Custom: </label>
+            <input type="color" id="custom-color" value="#000000" style="width: 30px; height: 22px; border: 1px solid #000; cursor: pointer;">
+        </div>
         <div style="margin-top:8px;">
             <button onclick="promptLink('url')">URL</button>
             <button onclick="promptLink('coord')">Coord</button>
@@ -74,7 +78,7 @@
     let cameraX = 0, cameraY = 0;
     let tiles = {};
     let selectedCell = { tx: 0, ty: 0, cx: 0, cy: 0 };
-    let currentColor = 0;
+    let currentColor = 0x000000; // Store as decimal hex value
     let nickname = "User" + Math.floor(Math.random()*100);
     let ws = null;
 
@@ -198,7 +202,7 @@
                         for (let cx = 0; cx < TILE_W; cx++) {
                             const idx = cy * 16 + cx;
                             const char = tile.content[idx];
-                            const colorIdx = tile.properties.color[idx] || 0;
+                            const colorValue = tile.properties.color[idx] || 0;
                             const charX = xPos + (cx * CHAR_W);
                             const charY = yPos + (cy * CHAR_H);
 
@@ -214,7 +218,9 @@
                             }
 
                             if (char !== " ") {
-                                ctx.fillStyle = '#' + (PALETTE[colorIdx]).toString(16).padStart(6, '0');
+                                // Handle both palette indices (for backwards compatibility) and direct color values
+                                const color = (colorValue < 8) ? PALETTE[colorValue] : colorValue;
+                                ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
                                 ctx.fillText(char, charX, charY);
                             }
                         }
@@ -344,10 +350,19 @@
         s.onclick = () => {
             document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
             s.classList.add('active-color');
-            currentColor = i;
+            currentColor = color; // Store the actual color value
             document.getElementById('cur-col-name').innerText = PALETTE_NAMES[i];
         };
         p.appendChild(s);
+    });
+
+    // Custom Color Picker
+    const customColorInput = document.getElementById('custom-color');
+    customColorInput.addEventListener('input', (e) => {
+        const hexColor = e.target.value; // e.g. "#ff00aa"
+        currentColor = parseInt(hexColor.slice(1), 16); // Convert to decimal (0xff00aa)
+        document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
+        document.getElementById('cur-col-name').innerText = hexColor.toUpperCase();
     });
 
     window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; render(); });
