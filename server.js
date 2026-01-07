@@ -30,7 +30,7 @@ function getOrInitTile(tx, ty) {
     const inHollow = (tx >= -1 && tx <= 0 && ty >= -1 && ty <= 0);
     let writability = (inArea && !inHollow) ? 2 : 0;
     tiles[key] = {
-        content: " ".repeat(128),
+        content: new Array(128).fill(" "),
         properties: {
             writability: writability,
             color: new Array(128).fill(0),
@@ -160,9 +160,7 @@ wss.on('connection', (ws) => {
                 const tile = getOrInitTile(tileX, tileY);
                 if (tile.properties.writability === 2) { rejected[id] = 1; return; }
                 const idx = charY * 16 + charX;
-                let contentArr = tile.content.split('');
-                contentArr[idx] = char;
-                tile.content = contentArr.join('');
+                tile.content[idx] = char;
                 if (color !== undefined) tile.properties.color[idx] = color;
                 if (bgcolor !== undefined) tile.properties.bgcolor[idx] = bgcolor;
                 accepted.push(id);
