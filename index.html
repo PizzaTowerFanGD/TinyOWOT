@@ -187,7 +187,7 @@
         const key = `${ty},${tx}`;
         if (!tiles[key]) {
             tiles[key] = {
-                content: " ".repeat(128),
+                content: new Array(128).fill(" "),
                 properties: { writability: 0, color: new Array(128).fill(0), bgcolor: new Array(128).fill(-1), cell_props: {} }
             };
         }
@@ -202,12 +202,11 @@
         const encodedChar = encodeTextDecorations(char);
 
         // Optimistic Update: Change locally immediately
-        let contentArr = tile.content.split('');
-        contentArr[cy * 16 + cx] = encodedChar;
-        tile.content = contentArr.join('');
-        tile.properties.color[cy * 16 + cx] = currentColor;
+        const idx = cy * 16 + cx;
+        tile.content[idx] = encodedChar;
+        tile.properties.color[idx] = currentColor;
         if (useCellColor) {
-            tile.properties.bgcolor[cy * 16 + cx] = currentCellColor;
+            tile.properties.bgcolor[idx] = currentCellColor;
         }
 
         // Send to server
@@ -270,7 +269,7 @@
                     for (let cy = 0; cy < TILE_H; cy++) {
                         for (let cx = 0; cx < TILE_W; cx++) {
                             const idx = cy * 16 + cx;
-                            const charStr = tile.content[idx];
+                            const charStr = tile.content[idx] || " ";
                             const colorValue = tile.properties.color[idx] || 0;
                             const bgColorValue = tile.properties.bgcolor && tile.properties.bgcolor[idx];
                             const charX = xPos + (cx * CHAR_W);
@@ -295,7 +294,7 @@
 
                             // Parse decorations and render character
                             const { char, bold, italic, underline, strike } = parseTextDecorations(charStr);
-                            if (char !== " ") {
+                            if (char !== " " && char !== undefined) {
                                 // Handle both palette indices (for backwards compatibility) and direct color values
                                 const color = (colorValue < 8) ? PALETTE[colorValue] : colorValue;
                                 ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
@@ -401,9 +400,7 @@
             const { tx, ty, cx, cy } = selectedCell;
             const tile = getLocalTile(tx, ty);
             const idx = cy * 16 + cx;
-            let contentArr = tile.content.split('');
-            contentArr[idx] = " ";
-            tile.content = contentArr.join('');
+            tile.content[idx] = " ";
             tile.properties.color[idx] = 0;
             tile.properties.bgcolor[idx] = -1;
 
@@ -496,6 +493,10 @@
     customCellColorInput.addEventListener('input', (e) => {
         const hexColor = e.target.value;
         currentCellColor = parseInt(hexColor.slice(1), 16);
+    });
+
+    useCellColorCheckbox.addEventListener('change', (e) => {
+        useCellColor = e.target.checked;
     });
 
     window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; render(); });
