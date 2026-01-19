@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const WebSocket = require('ws');
 const querystring = require('querystring');
@@ -13,12 +14,89 @@ const UVIAS_TOKEN = process.env.UVIAS_TOKEN || "";
 const CSRF_TOKEN = process.env.CSRF_TOKEN || "default_middleware_token"; 
 const CSRF_COOKIE_TOKEN = process.env.CSRF_COOKIE_TOKEN || "default_cookie_token";
 
+// --- GITHUB CONFIG ---
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
+const GITHUB_REPO = process.env.GITHUB_REPO || ""; 
+const LOG_THRESHOLD = 10000;
+
 const FAKE_SYSTEM_USER = 'GlobalRelay';
 const CSRF_INPUT_TAG = `<input type="hidden" name="csrfmiddlewaretoken" value="${CSRF_TOKEN}">`;
 
 const tiles = {}; 
 const clients = new Set();
 let owotBot = null;
+
+// --- LOGGING STATE ---
+let chatBuffer = "";
+let messageCount = 0;
+
+/**
+ * GITHUB UPLOAD LOGIC
+ */
+function uploadToGithub() {
+    if (!GITHUB_TOKEN || !GITHUB_REPO) {
+        console.error("GitHub logging failed: Missing Credentials");
+        chatBuffer = ""; messageCount = 0;
+        return;
+    }
+
+    const filename = `logs/chat_${Date.now()}.txt`;
+    const base64Content = Buffer.from(chatBuffer).toString('base64');
+    const data = JSON.stringify({
+        message: `Archiving ${LOG_THRESHOLD} messages`,
+        content: base64Content
+    });
+
+    const options = {
+        hostname: 'api.github.com',
+        path: `/repos/${GITHUB_REPO}/contents/${filename}`,
+        method: 'PUT',
+        headers: {
+            'Authorization': `token ${GITHUB_TOKEN}`,
+            'User-Agent': 'NodeJS-Relay',
+            'Content-Type': 'application/json',
+            'Content-Length': data.length
+        }
+    };
+
+    const req = https.request(options, (res) => {
+        if (res.statusCode === 201) console.log("Log uploaded to GitHub.");
+        else console.error(`GitHub Error: ${res.statusCode}`);
+    });
+
+    req.on('error', (e) => console.error(`GitHub Req Error: ${e.message}`));
+    req.write(data);
+    req.end();
+
+    chatBuffer = ""; 
+    messageCount = 0;
+}
+
+/**
+ * FORMATTING LOGIC
+ * realUsername: message\n
+ * [id]: message\n
+ * [*id] nickname: message\n
+ */
+function logChat(msgData) {
+    const { realUsername, nickname, id, message } = msgData;
+    let line = "";
+
+    if (realUsername) {
+        line = `${realUsername}: ${message}\n`;
+    } else if (nickname) {
+        line = `[*${id}] ${nickname}: ${message}\n`;
+    } else {
+        line = `[${id}]: ${message}\n`;
+    }
+
+    chatBuffer += line;
+    messageCount++;
+
+    if (messageCount >= LOG_THRESHOLD) {
+        uploadToGithub();
+    }
+}
 
 /**
  * TILE LOGIC
@@ -46,24 +124,18 @@ function getOrInitTile(tx, ty) {
  */
 const server = http.createServer((req, res) => {
     if (req.method === 'GET') {
-        res.writeHead(200, { 
-            'Content-Type': 'text/html',
-            'Set-Cookie': `csrftoken=${CSRF_COOKIE_TOKEN}; Path=/; SameSite=Lax` 
-        });
-        
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': `csrftoken=${CSRF_COOKIE_TOKEN}; Path=/; SameSite=Lax` });
         const indexPath = './index.html';
         if (fs.existsSync(indexPath)) {
             let html = fs.readFileSync(indexPath).toString();
-            html = html.includes('<body') 
-                ? html.replace(/(<body[^>]*>)/i, `$1\n    ${CSRF_INPUT_TAG}`)
-                : CSRF_INPUT_TAG + html;
+            html = html.includes('<body') ? html.replace(/(<body[^>]*>)/i, `$1\n    ${CSRF_INPUT_TAG}`) : CSRF_INPUT_TAG + html;
             res.end(html);
         } else {
-            res.end("<h1>Server is Running</h1><p>index.html not found. Local logic active.</p>");
+            res.end("<h1>Server Running</h1>");
         }
         return;
     }
-
+    // Handle POST (CSRF check)
     if (req.method === 'POST') {
         let body = '';
         req.on('data', chunk => { body += chunk.toString(); });
@@ -74,7 +146,7 @@ const server = http.createServer((req, res) => {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ status: "ok" }));
             } else {
-                res.writeHead(403); res.end("Forbidden: CSRF Invalid");
+                res.writeHead(403); res.end("Forbidden");
             }
         });
         return;
@@ -82,47 +154,27 @@ const server = http.createServer((req, res) => {
 });
 
 /**
- * WEBSOCKET SERVER & PROXY ROUTING
+ * WEBSOCKET SERVER
  */
 const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
     const { pathname } = url.parse(request.url || '/');
-
     if (pathname === '/owotproxy') {
-        // --- PROXY HANDLER ---
         wss.handleUpgrade(request, socket, head, (clientWs) => {
             const headers = { 'User-Agent': 'Mozilla/5.0', 'Origin': REMOTE_ORIGIN };
             if (UVIAS_TOKEN) headers['Cookie'] = `uvias=${UVIAS_TOKEN}; csrftoken=${CSRF_COOKIE_TOKEN}`;
-
             const remoteWs = new WebSocket(REMOTE_OWOT_URL, { headers });
-
-            // Pipe everything exactly
-            clientWs.on('message', (data) => {
-                if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data);
-            });
-            remoteWs.on('message', (data) => {
-                if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
-            });
-
-            // Handle closures
+            clientWs.on('message', (data) => { if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data); });
+            remoteWs.on('message', (data) => { if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data); });
             const closeAll = () => { clientWs.close(); remoteWs.close(); };
-            clientWs.on('close', closeAll);
-            remoteWs.on('close', closeAll);
-            clientWs.on('error', () => {});
-            remoteWs.on('error', () => {});
+            clientWs.on('close', closeAll); remoteWs.on('close', closeAll);
         });
     } else {
-        // --- LOCAL APP HANDLER ---
-        wss.handleUpgrade(request, socket, head, (ws) => {
-            wss.emit('connection', ws, request);
-        });
+        wss.handleUpgrade(request, socket, head, (ws) => { wss.emit('connection', ws, request); });
     }
 });
 
-/**
- * LOCAL APP LOGIC
- */
 function broadcastLocal(data, skipWs = null) {
     const msg = JSON.stringify(data);
     clients.forEach(c => { 
@@ -134,13 +186,32 @@ function broadcastLocal(data, skipWs = null) {
 
 wss.on('connection', (ws) => {
     clients.add(ws);
-    ws.id = Math.floor(Math.random() * 10000);
+    ws.id = Math.floor(Math.random() * 90000) + 10000;
     ws.send(JSON.stringify({ kind: "channel", sender: ws.id, initial_user_count: clients.size }));
 
     ws.on('message', (message) => {
         let data;
         try { data = JSON.parse(message); } catch(e) { return; }
 
+        if (data.kind === "chat") {
+            // Log local message
+            logChat({
+                realUsername: data.realUsername, // Undefined for local usually
+                nickname: data.nickname,
+                id: ws.id,
+                message: data.message
+            });
+
+            broadcastLocal({
+                kind: "chat", nickname: data.nickname, message: data.message,
+                id: ws.id, color: data.color, location: data.location, date: Date.now()
+            });
+            if (owotBot && owotBot.readyState === WebSocket.OPEN) {
+                owotBot.send(JSON.stringify({ kind: "chat", nickname: `[L] ${data.nickname || 'Anon'}`, message: data.message, location: "page" }));
+            }
+        }
+        
+        // Handle fetch/write/cursor... (omitted for brevity, keep your original logic)
         if (data.kind === "fetch") {
             const responseTiles = {};
             (data.fetchRectangles || []).forEach(rect => {
@@ -152,7 +223,6 @@ wss.on('connection', (ws) => {
             });
             ws.send(JSON.stringify({ kind: "fetch", tiles: responseTiles, request: data.request }));
         }
-
         if (data.kind === "write") {
             const accepted = [], rejected = {}, tileUpdates = {};
             (data.edits || []).forEach(edit => {
@@ -169,19 +239,6 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ kind: "write", accepted, rejected, request: data.request }));
             if (Object.keys(tileUpdates).length > 0) broadcastLocal({ kind: "tileUpdate", tiles: tileUpdates }, ws);
         }
-
-        if (data.kind === "chat") {
-            broadcastLocal({
-                kind: "chat", nickname: data.nickname, message: data.message,
-                id: ws.id, color: data.color, location: data.location, date: Date.now()
-            });
-            if (owotBot && owotBot.readyState === WebSocket.OPEN) {
-                owotBot.send(JSON.stringify({
-                    kind: "chat", nickname: `[L] ${data.nickname || 'Anon'}`, message: data.message, location: "page"
-                }));
-            }
-        }
-
         if (data.kind === "cursor") {
             broadcastLocal({ kind: "cursor", channel: ws.id, position: data.position, hidden: data.hidden }, ws);
         }
@@ -194,16 +251,6 @@ wss.on('connection', (ws) => {
 });
 
 /**
- * START SERVER
- */
-server.listen(LOCAL_PORT, "0.0.0.0", () => {
-    console.log(`PORT_OPEN: Server listening on port ${LOCAL_PORT}`);
-    
-    // Start bot AFTER the server is listening
-    connectToRemoteOWOT();
-});
-
-/**
  * BOT CLIENT
  */
 function connectToRemoteOWOT() {
@@ -212,7 +259,6 @@ function connectToRemoteOWOT() {
 
     try {
         owotBot = new WebSocket(REMOTE_OWOT_URL, { headers });
-
         owotBot.on('open', () => {
             owotBot.send(JSON.stringify({ kind: "boundary", centerX: 0, centerY: 0, minX: -5, minY: -5, maxX: 5, maxY: 5 }));
         });
@@ -222,6 +268,15 @@ function connectToRemoteOWOT() {
             try { data = JSON.parse(message); } catch(e) { return; }
             if (data.kind === "chat") {
                 if (data.nickname && data.nickname.startsWith('[L]')) return;
+                
+                // Log remote message
+                logChat({
+                    realUsername: data.real_username, // OWOT API property for registered users
+                    nickname: data.nickname,
+                    id: data.id || "Remote",
+                    message: data.message
+                });
+
                 broadcastLocal({
                     kind: "chat", nickname: data.nickname || 'Anon', message: data.message,
                     realUsername: FAKE_SYSTEM_USER, registered: true, op: false, id: 99999,
@@ -232,10 +287,12 @@ function connectToRemoteOWOT() {
         });
 
         owotBot.on('close', () => setTimeout(connectToRemoteOWOT, 10000));
-        owotBot.on('error', () => {});
-    } catch(e) {
-        console.error("Bot failed to start", e);
-    }
+    } catch(e) { console.error("Bot Error", e); }
 }
+
+server.listen(LOCAL_PORT, "0.0.0.0", () => {
+    console.log(`Server listening on port ${LOCAL_PORT}`);
+    connectToRemoteOWOT();
+});
 
 process.on('uncaughtException', (err) => { console.error('CRITICAL ERROR:', err); });
