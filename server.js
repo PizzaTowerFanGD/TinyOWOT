@@ -14,6 +14,10 @@ const UVIAS_TOKEN = process.env.UVIAS_TOKEN || "";
 const CSRF_TOKEN = process.env.CSRF_TOKEN || "default_middleware_token"; 
 const CSRF_COOKIE_TOKEN = process.env.CSRF_COOKIE_TOKEN || "default_cookie_token";
 
+// --- 3D STORAGE ---
+const tiles3D = {};
+const clients3D = new Set();
+
 // --- GITHUB CONFIG ---
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 const GITHUB_REPO = process.env.GITHUB_REPO || ""; 
@@ -124,6 +128,19 @@ function getOrInitTile(tx, ty) {
  */
 const server = http.createServer((req, res) => {
     if (req.method === 'GET') {
+        const { pathname } = url.parse(req.url || '/');
+        
+        if (pathname === '/3d') {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            const indexPath = './3d.html';
+            if (fs.existsSync(indexPath)) {
+                res.end(fs.readFileSync(indexPath));
+            } else {
+                res.end("<h1>3D version not found</h1>");
+            }
+            return;
+        }
+        
         res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': `csrftoken=${CSRF_COOKIE_TOKEN}; Path=/; SameSite=Lax` });
         const indexPath = './index.html';
         if (fs.existsSync(indexPath)) {
@@ -157,6 +174,7 @@ const server = http.createServer((req, res) => {
  * WEBSOCKET SERVER
  */
 const wss = new WebSocket.Server({ noServer: true });
+const wss3D = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
     const { pathname } = url.parse(request.url || '/');
@@ -170,6 +188,8 @@ server.on('upgrade', (request, socket, head) => {
             const closeAll = () => { clientWs.close(); remoteWs.close(); };
             clientWs.on('close', closeAll); remoteWs.on('close', closeAll);
         });
+    } else if (pathname === '/3dws') {
+        wss3D.handleUpgrade(request, socket, head, (ws) => { wss3D.emit('connection', ws, request); });
     } else {
         wss.handleUpgrade(request, socket, head, (ws) => { wss.emit('connection', ws, request); });
     }
@@ -247,6 +267,87 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         clients.delete(ws);
         broadcastLocal({ kind: "cursor", channel: ws.id, hidden: true });
+    });
+});
+
+/**
+ * 3D WEBSOCKET SERVER
+ */
+function getOrInit3DTile(tx, ty, tz) {
+    const key = `${tz},${ty},${tx}`;
+    if (tiles3D[key]) return tiles3D[key];
+    const inArea = (tx >= -2 && tx <= 1 && ty >= -2 && ty <= 1 && tz >= 0 && tz <= 3);
+    const inHollow = (tx >= -1 && tx <= 0 && ty >= -1 && ty <= 0 && tz >= 1 && tz <= 2);
+    let writability = (inArea && !inHollow) ? 2 : 0;
+    tiles3D[key] = {
+        content: new Array(128).fill(" "),
+        dir: new Array(128).fill("x+"),
+        properties: {
+            writability: writability,
+            color: new Array(128).fill(0),
+            bgcolor: new Array(128).fill(-1),
+            cell_props: {}
+        }
+    };
+    return tiles3D[key];
+}
+
+function broadcast3D(data, skipWs = null) {
+    const msg = JSON.stringify(data);
+    clients3D.forEach(c => {
+        if (c !== skipWs && c.readyState === WebSocket.OPEN) {
+            try { c.send(msg); } catch(e) {}
+        }
+    });
+}
+
+wss3D.on('connection', (ws) => {
+    clients3D.add(ws);
+    ws.id = Math.floor(Math.random() * 90000) + 10000;
+    ws.send(JSON.stringify({ kind: "channel", sender: ws.id, initial_user_count: clients3D.size }));
+
+    ws.on('message', (message) => {
+        let data;
+        try { data = JSON.parse(message); } catch(e) { return; }
+
+        if (data.kind === "fetch") {
+            const responseTiles = {};
+            (data.fetchRectangles || []).forEach(rect => {
+                for (let z = rect.minZ || 0; z <= (rect.maxZ || 0); z++) {
+                    for (let y = rect.minY; y <= rect.maxY; y++) {
+                        for (let x = rect.minX; x <= rect.maxX; x++) {
+                            responseTiles[`${z},${y},${x}`] = getOrInit3DTile(x, y, z);
+                        }
+                    }
+                }
+            });
+            ws.send(JSON.stringify({ kind: "fetch", tiles: responseTiles, request: data.request }));
+        }
+        if (data.kind === "write") {
+            const accepted = [], rejected = {}, tileUpdates = {};
+            (data.edits || []).forEach(edit => {
+                const [tileZ, tileY, tileX, charY, charX, time, char, id, color, bgcolor, dir] = edit;
+                const tile = getOrInit3DTile(tileX, tileY, tileZ);
+                if (tile.properties.writability === 2) { rejected[id] = 1; return; }
+                const idx = charY * 16 + charX;
+                tile.content[idx] = char;
+                if (color !== undefined) tile.properties.color[idx] = color;
+                if (bgcolor !== undefined) tile.properties.bgcolor[idx] = bgcolor;
+                if (dir !== undefined) tile.dir[idx] = dir;
+                accepted.push(id);
+                tileUpdates[`${tileZ},${tileY},${tileX}`] = tile;
+            });
+            ws.send(JSON.stringify({ kind: "write", accepted, rejected, request: data.request }));
+            if (Object.keys(tileUpdates).length > 0) broadcast3D({ kind: "tileUpdate", tiles: tileUpdates }, ws);
+        }
+        if (data.kind === "cursor") {
+            broadcast3D({ kind: "cursor", channel: ws.id, position: data.position, hidden: data.hidden }, ws);
+        }
+    });
+
+    ws.on('close', () => {
+        clients3D.delete(ws);
+        broadcast3D({ kind: "cursor", channel: ws.id, hidden: true });
     });
 });
 
