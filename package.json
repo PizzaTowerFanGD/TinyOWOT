@@ -4,7 +4,8 @@
   "description": "Lightweight OWOT client",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "3d": "node 3dserver.js"
   },
   "dependencies": {
     "ws": "^8.19.0"
