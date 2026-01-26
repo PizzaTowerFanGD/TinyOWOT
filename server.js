@@ -124,6 +124,21 @@ function getOrInitTile(tx, ty) {
  */
 const server = http.createServer((req, res) => {
     if (req.method === 'GET') {
+        const { pathname } = url.parse(req.url || '/');
+
+        // keep 3d client separate from main client.
+        // do not inject csrf into the 3d client since it does not use the csrf-protected post path.
+        if (pathname === '/3d' || pathname === '/index3d.html') {
+            res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': `csrftoken=${CSRF_COOKIE_TOKEN}; Path=/; SameSite=Lax` });
+            const p = './index3d.html';
+            if (fs.existsSync(p)) {
+                res.end(fs.readFileSync(p).toString());
+            } else {
+                res.end('<h1>missing index3d.html</h1>');
+            }
+            return;
+        }
+
         res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': `csrftoken=${CSRF_COOKIE_TOKEN}; Path=/; SameSite=Lax` });
         const indexPath = './index.html';
         if (fs.existsSync(indexPath)) {
