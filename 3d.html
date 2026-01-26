@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TinyOWOT 3D</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #1a1a2e; font-family: 'Courier New', monospace; touch-action: none; user-select: none; -webkit-user-select: none; }
+        canvas { display: block; image-rendering: pixelated; }
+        
+        #ui-layer { position: fixed; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 10; }
+        .panel { pointer-events: auto; background: rgba(255,255,255,0.9); border: 1px solid #999; padding: 5px; margin: 5px; display: inline-block; vertical-align: top; font-size: 13px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
+        
+        .color-picker { display: flex; gap: 3px; margin-top: 5px; }
+        .color-swatch { width: 22px; height: 22px; border: 1px solid #000; cursor: pointer; border-radius: 2px; }
+        .active-color { outline: 3px solid #007bff; z-index: 1; }
+        .active-dir { background: #007bff; color: white; }
+
+        button { cursor: pointer; padding: 4px 8px; font-size: 12px; }
+        #coords { position: fixed; bottom: 5px; left: 5px; font-size: 10px; color: #aaa; pointer-events: none; }
+
+        /* Mobile controls */
+        #mobile-controls { position: fixed; bottom: 80px; left: 10px; pointer-events: auto; display: none; }
+        #mobile-controls.show { display: block; }
+        .control-row { display: flex; gap: 5px; margin-bottom: 5px; }
+        .control-btn { width: 50px; height: 50px; font-size: 20px; background: rgba(255,255,255,0.8); border: 2px solid #555; border-radius: 5px; display: flex; align-items: center; justify-content: center; }
+        .control-btn:active { background: rgba(255,255,255,1); }
+        
+        #toggle-mobile { position: fixed; bottom: 10px; left: 10px; pointer-events: auto; display: none; z-index: 100; }
+        #toggle-mobile.show { display: block; }
+        
+        #help { position: fixed; top: 5px; right: 5px; pointer-events: auto; }
+    </style>
+</head>
+<body>
+
+<div id="ui-layer">
+    <div class="panel">
+        <strong>Tools</strong><br>
+        Text Color: <span id="cur-col-name">Black</span>
+        <div class="color-picker" id="palette"></div>
+        <div style="margin-top:5px;">
+            <label style="font-size: 11px;">Custom: </label>
+            <input type="color" id="custom-color" value="#000000" style="width: 30px; height: 22px; border: 1px solid #000; cursor: pointer;">
+        </div>
+        <div style="margin-top:8px;">
+            <label style="font-size: 11px;">Text Direction:</label><br>
+            <button id="dir-x+" onclick="setDir('x+')" class="active-dir">X+</button>
+            <button id="dir-x-" onclick="setDir('x-')">X-</button>
+            <button id="dir-y+" onclick="setDir('y+')">Y+</button>
+            <button id="dir-y-" onclick="setDir('y-')">Y-</button>
+            <button id="dir-z+" onclick="setDir('z+')">Z+</button>
+            <button id="dir-z-" onclick="setDir('z-')">Z-</button>
+        </div>
+    </div>
+    
+    <button id="help" onclick="toggleHelp()">?</button>
+    
+    <div id="help-panel" class="panel" style="display:none; max-width: 300px;">
+        <strong>Controls:</strong><br>
+        PC: Arrow keys = move X/Z plane<br>
+        Ctrl+Up/Down = move Y (up/down)<br>
+        Mouse drag = rotate view<br>
+        Scroll = zoom<br>
+        Click = select cell<br>
+        Type = write text<br><br>
+        Mobile: Toggle buttons for movement
+    </div>
+</div>
+
+<button id="toggle-mobile" onclick="toggleMobileControls()">☰</button>
+
+<div id="mobile-controls">
+    <div class="control-row">
+        <button class="control-btn" id="btn-x-" onpointerdown="startMove('x-', 1)" onpointerup="stopMove()" onpointerleave="stopMove()">←</button>
+        <button class="control-btn" id="btn-y+" onpointerdown="startMove('y+', 1)" onpointerup="stopMove()" onpointerleave="stopMove()">↑</button>
+        <button class="control-btn" id="btn-y-" onpointerdown="startMove('y-', 1)" onpointerup="stopMove()" onpointerleave="stopMove()">↓</button>
+        <button class="control-btn" id="btn-x+" onpointerdown="startMove('x+', 1)" onpointerup="stopMove()" onpointerleave="stopMove()">→</button>
+    </div>
+    <div class="control-row">
+        <button class="control-btn" id="btn-z-" onpointerdown="startMove('z-', 1)" onpointerup="stopMove()" onpointerleave="stopMove()">Z-</button>
+        <button class="control-btn" id="btn-z+" onpointerdown="startMove('z+', 1)" onpointerup="stopMove()" onpointerleave="stopMove()">Z+</button>
+    </div>
+</div>
+
+<div id="coords">X: 0, Y: 0, Z: 0</div>
+<input type="text" id="hidden-input" autocomplete="off" autocapitalize="off" spellcheck="false" style="position: absolute; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; border: none; padding: 0; z-index: -1; pointer-events: none;">
+
+<canvas id="world3d"></canvas>
+
+<script>
+    const canvas = document.getElementById('world3d');
+    const ctx = canvas.getContext('2d');
+    const hiddenInput = document.getElementById('hidden-input');
+    
+    // Config
+    const TILE_W = 16, TILE_H = 8;
+    const CELL_SIZE = 10;
+    const PALETTE = [0x000000, 0xFF0000, 0x00FF00, 0x0000FF, 0xFF00FF, 0x00FFFF, 0x7F7F7F, 0xFFFF00];
+    const PALETTE_NAMES = ["Black", "Red", "Green", "Blue", "Magenta", "Cyan", "Gray", "Yellow"];
+
+    // Camera and navigation
+    let camX = 0, camY = 100, camZ = -200;
+    let camRotX = 0.5, camRotY = 0.5;
+    let camZoom = 1;
+    
+    let selectedCell = { tx: 0, ty: 0, tz: 0, cx: 0, cy: 0 };
+    let currentColor = 0x000000;
+    let currentDir = "x+";
+    let tiles = {};
+    let ws = null;
+
+    // Direction vectors for text rendering
+    const DIR_VECTORS = {
+        'x+': { x: 1, y: 0, z: 0 },
+        'x-': { x: -1, y: 0, z: 0 },
+        'y+': { x: 0, y: 1, z: 0 },
+        'y-': { x: 0, y: -1, z: 0 },
+        'z+': { x: 0, y: 0, z: 1 },
+        'z-': { x: 0, y: 0, z: -1 }
+    };
+
+    // --- 3D Math ---
+
+    function rotatePoint(x, y, z, rotX, rotY) {
+        // Rotate around Y axis (rotY) then X axis (rotX)
+        let cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+        let cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+        
+        // Y rotation
+        let x1 = x * cosY - z * sinY;
+        let z1 = x * sinY + z * cosY;
+        let y1 = y;
+        
+        // X rotation
+        let y2 = y1 * cosX - z1 * sinX;
+        let z2 = y1 * sinX + z1 * cosX;
+        let x2 = x1;
+        
+        return { x: x2, y: y2, z: z2 };
+    }
+
+    function project(x, y, z) {
+        // Translate to camera
+        let rx = x - camX;
+        let ry = y - camY;
+        let rz = z - camZ;
+        
+        // Rotate
+        let r = rotatePoint(rx, ry, rz, camRotX, camRotY);
+        
+        // Project
+        if (r.z <= 1) return null;
+        const fov = 400;
+        const scale = fov / r.z * camZoom;
+        
+        return {
+            x: canvas.width / 2 + r.x * scale,
+            y: canvas.height / 2 - r.y * scale,
+            z: r.z,
+            scale: scale
+        };
+    }
+
+    // --- Networking ---
+
+    function connect() {
+        if (ws) ws.close();
+        ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/3dws');
+        
+        ws.onopen = () => {
+            fetchVisibleTiles();
+        };
+
+        ws.onmessage = (msg) => {
+            const data = JSON.parse(msg.data);
+            if (data.kind === "fetch" || data.kind === "tileUpdate") {
+                Object.assign(tiles, data.tiles);
+                render();
+            }
+        };
+    }
+
+    function fetchVisibleTiles() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const range = 3;
+        ws.send(JSON.stringify({ 
+            kind: "fetch", 
+            fetchRectangles: [{ 
+                minX: selectedCell.tx - range, maxX: selectedCell.tx + range,
+                minY: selectedCell.ty - range, maxY: selectedCell.ty + range,
+                minZ: selectedCell.tz - range, maxZ: selectedCell.tz + range
+            }], 
+            request: "view" 
+        }));
+    }
+
+    // --- Tile Logic ---
+
+    function getLocalTile(tx, ty, tz) {
+        const key = `${tz},${ty},${tx}`;
+        if (!tiles[key]) {
+            tiles[key] = {
+                content: new Array(128).fill(" "),
+                dir: new Array(128).fill("x+"),
+                properties: { writability: 0, color: new Array(128).fill(0), bgcolor: new Array(128).fill(-1), cell_props: {} }
+            };
+        }
+        return tiles[key];
+    }
+
+    function handleWrite(char) {
+        const { tx, ty, tz, cx, cy } = selectedCell;
+        const tile = getLocalTile(tx, ty, tz);
+        const idx = cy * 16 + cx;
+        
+        tile.content[idx] = char;
+        tile.dir[idx] = currentDir;
+        tile.properties.color[idx] = currentColor;
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            const editArray = [tz, ty, tx, cy, cx, Date.now(), char, Math.random(), currentColor, undefined, currentDir];
+            ws.send(JSON.stringify({ kind: "write", edits: [editArray] }));
+        }
+
+        // Advance cursor based on direction
+        advanceCursor();
+        render();
+    }
+
+    function advanceCursor() {
+        const dir = DIR_VECTORS[currentDir];
+        selectedCell.cx += dir.x;
+        selectedCell.cy += dir.y;
+        selectedCell.tz += dir.z;
+        
+        if (selectedCell.cx >= 16) { selectedCell.cx = 0; selectedCell.tx++; }
+        if (selectedCell.cx < 0) { selectedCell.cx = 15; selectedCell.tx--; }
+        if (selectedCell.cy >= 8) { selectedCell.cy = 0; selectedCell.ty++; }
+        if (selectedCell.cy < 0) { selectedCell.cy = 7; selectedCell.ty--; }
+    }
+
+    // --- Rendering ---
+
+    function render() {
+        ctx.fillStyle = "#1a1a2e";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        const drawList = [];
+        const range = 4;
+        
+        for (let tz = selectedCell.tz - range; tz <= selectedCell.tz + range; tz++) {
+            for (let ty = selectedCell.ty - range; ty <= selectedCell.ty + range; ty++) {
+                for (let tx = selectedCell.tx - range; tx <= selectedCell.tx + range; tx++) {
+                    const tile = tiles[`${tz},${ty},${tx}`];
+                    if (!tile) continue;
+                    
+                    const baseX = tx * TILE_W * CELL_SIZE;
+                    const baseY = ty * TILE_H * CELL_SIZE;
+                    const baseZ = tz * CELL_SIZE * 2;
+                    
+                    // Project tile center for depth sorting
+                    const center = project(baseX + TILE_W * CELL_SIZE / 2, baseY + TILE_H * CELL_SIZE / 2, baseZ + CELL_SIZE);
+                    if (center) {
+                        drawList.push({ tx, ty, tz, tile, baseX, baseY, baseZ, depth: center.z });
+                    }
+                }
+            }
+        }
+        
+        // Sort back to front
+        drawList.sort((a, b) => b.depth - a.depth);
+        
+        ctx.font = "10px monospace";
+        ctx.textBaseline = "top";
+        
+        for (const item of drawList) {
+            renderTile(item);
+        }
+        
+        // Selection indicator
+        const sel = project(
+            selectedCell.tx * TILE_W * CELL_SIZE + selectedCell.cx * CELL_SIZE + CELL_SIZE / 2,
+            selectedCell.ty * TILE_H * CELL_SIZE + selectedCell.cy * CELL_SIZE + CELL_SIZE / 2,
+            selectedCell.tz * CELL_SIZE * 2 + CELL_SIZE / 2
+        );
+        if (sel && sel.scale > 0) {
+            ctx.strokeStyle = "#00ffff";
+            ctx.lineWidth = 2 / sel.scale;
+            const size = CELL_SIZE * sel.scale;
+            ctx.strokeRect(sel.x - size / 2, sel.y - size / 2, size, size);
+        }
+        
+        updateCoords();
+    }
+
+    function renderTile(item) {
+        const { tx, ty, tz, tile, baseX, baseY, baseZ } = item;
+        
+        // Draw tile border
+        const corners = [
+            project(baseX, baseY, baseZ),
+            project(baseX + TILE_W * CELL_SIZE, baseY, baseZ),
+            project(baseX + TILE_W * CELL_SIZE, baseY + TILE_H * CELL_SIZE, baseZ),
+            project(baseX, baseY + TILE_H * CELL_SIZE, baseZ),
+            project(baseX, baseY, baseZ + CELL_SIZE * 2),
+            project(baseX + TILE_W * CELL_SIZE, baseY, baseZ + CELL_SIZE * 2),
+            project(baseX + TILE_W * CELL_SIZE, baseY + TILE_H * CELL_SIZE, baseZ + CELL_SIZE * 2),
+            project(baseX, baseY + TILE_H * CELL_SIZE, baseZ + CELL_SIZE * 2),
+        ];
+        
+        if (!corners[0]) return;
+        
+        ctx.strokeStyle = "rgba(100, 100, 150, 0.3)";
+        ctx.lineWidth = 1;
+        
+        // Draw edges
+        const edges = [
+            [0, 1], [1, 2], [2, 3], [3, 0], // front face
+            [4, 5], [5, 6], [6, 7], [7, 4], // back face
+            [0, 4], [1, 5], [2, 6], [3, 7]  // connecting edges
+        ];
+        
+        for (const [a, b] of edges) {
+            if (corners[a] && corners[b]) {
+                ctx.beginPath();
+                ctx.moveTo(corners[a].x, corners[a].y);
+                ctx.lineTo(corners[b].x, corners[b].y);
+                ctx.stroke();
+            }
+        }
+        
+        // Draw characters
+        for (let cy = 0; cy < TILE_H; cy++) {
+            for (let cx = 0; cx < TILE_W; cx++) {
+                const idx = cy * 16 + cx;
+                const char = tile.content[idx];
+                if (char === " ") continue;
+                
+                const charX = baseX + cx * CELL_SIZE + CELL_SIZE / 2;
+                const charY = baseY + cy * CELL_SIZE + CELL_SIZE / 2;
+                const charZ = baseZ + CELL_SIZE;
+                
+                const dir = tile.dir[idx] || "x+";
+                const dirVec = DIR_VECTORS[dir];
+                
+                const p1 = project(charX, charY, charZ);
+                const p2 = project(charX + dirVec.x * CELL_SIZE, charY + dirVec.y * CELL_SIZE, charZ + dirVec.z * CELL_SIZE * 2);
+                
+                if (p1 && p2 && p1.z > 0) {
+                    const color = tile.properties.color[idx] || 0;
+                    const colorHex = (color < 8) ? PALETTE[color] : color;
+                    ctx.fillStyle = '#' + colorHex.toString(16).padStart(6, '0');
+                    
+                    ctx.save();
+                    ctx.translate(p1.x, p1.y);
+                    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+                    ctx.rotate(angle);
+                    ctx.fillText(char, 0, -5);
+                    ctx.restore();
+                }
+            }
+        }
+    }
+
+    // --- Interaction ---
+
+    function updateCoords() {
+        document.getElementById('coords').innerText = `X: ${selectedCell.tx}, Y: ${selectedCell.ty}, Z: ${selectedCell.tz}`;
+    }
+
+    let isDragging = false, lastMouse = { x: 0, y: 0 };
+
+    canvas.addEventListener('pointerdown', (e) => {
+        isDragging = true;
+        lastMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    window.addEventListener('pointermove', (e) => {
+        if (isDragging) {
+            camRotY += e.movementX * 0.005;
+            camRotX += e.movementY * 0.005;
+            camRotX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camRotX));
+            render();
+        }
+    });
+
+    window.addEventListener('pointerup', (e) => {
+        isDragging = false;
+    });
+
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        camZoom *= e.deltaY > 0 ? 0.9 : 1.1;
+        camZoom = Math.max(0.1, Math.min(10, camZoom));
+        render();
+    });
+
+    canvas.addEventListener('click', (e) => {
+        // Simple raycast approximation
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        
+        let closest = null;
+        let closestDist = Infinity;
+        
+        const range = 4;
+        for (let tz = selectedCell.tz - range; tz <= selectedCell.tz + range; tz++) {
+            for (let ty = selectedCell.ty - range; ty <= selectedCell.ty + range; ty++) {
+                for (let tx = selectedCell.tx - range; tx <= selectedCell.tx + range; tx++) {
+                    for (let cy = 0; cy < TILE_H; cy++) {
+                        for (let cx = 0; cx < TILE_W; cx++) {
+                            const x = tx * TILE_W * CELL_SIZE + cx * CELL_SIZE + CELL_SIZE / 2;
+                            const y = ty * TILE_H * CELL_SIZE + cy * CELL_SIZE + CELL_SIZE / 2;
+                            const z = tz * CELL_SIZE * 2 + CELL_SIZE;
+                            
+                            const p = project(x, y, z);
+                            if (p && p.z > 0) {
+                                const dist = Math.hypot(p.x - mx, p.y - my);
+                                if (dist < 15 && dist < closestDist) {
+                                    closest = { tx, ty, tz, cx, cy };
+                                    closestDist = dist;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (closest) {
+            selectedCell = closest;
+            setTimeout(() => hiddenInput.focus(), 10);
+            fetchVisibleTiles();
+            render();
+        }
+    });
+
+    window.addEventListener('keydown', (e) => {
+        if (document.activeElement === hiddenInput) {
+            if (e.key === "Escape") hiddenInput.blur();
+            return;
+        }
+        
+        const moveSpeed = e.ctrlKey ? 20 : 10;
+        
+        if (e.key === "ArrowLeft") camX -= moveSpeed;
+        if (e.key === "ArrowRight") camX += moveSpeed;
+        if (e.key === "ArrowUp") {
+            if (e.ctrlKey) camY += moveSpeed;
+            else camZ += moveSpeed;
+        }
+        if (e.key === "ArrowDown") {
+            if (e.ctrlKey) camY -= moveSpeed;
+            else camZ -= moveSpeed;
+        }
+        
+        if (e.key.startsWith("Arrow")) {
+            render();
+        }
+        
+        if (e.key === " ") {
+            e.preventDefault();
+            hiddenInput.focus();
+        }
+    });
+
+    hiddenInput.addEventListener('input', (e) => {
+        const char = e.data || e.target.value.slice(-1);
+        if (char && char.length === 1) handleWrite(char);
+        hiddenInput.value = "";
+    });
+
+    // Mobile controls
+    let moveInterval = null;
+    
+    function startMove(dir) {
+        stopMove();
+        moveInterval = setInterval(() => {
+            const moveSpeed = 5;
+            switch(dir) {
+                case 'x+': camX += moveSpeed; break;
+                case 'x-': camX -= moveSpeed; break;
+                case 'y+': camY += moveSpeed; break;
+                case 'y-': camY -= moveSpeed; break;
+                case 'z+': camZ += moveSpeed; break;
+                case 'z-': camZ -= moveSpeed; break;
+            }
+            render();
+        }, 50);
+    }
+    
+    function stopMove() {
+        if (moveInterval) {
+            clearInterval(moveInterval);
+            moveInterval = null;
+        }
+    }
+
+    function toggleMobileControls() {
+        document.getElementById('mobile-controls').classList.toggle('show');
+    }
+
+    // Show mobile toggle on touch devices
+    if ('ontouchstart' in window) {
+        document.getElementById('toggle-mobile').classList.add('show');
+    }
+
+    function toggleHelp() {
+        document.getElementById('help-panel').style.display = 
+            document.getElementById('help-panel').style.display === 'none' ? 'block' : 'none';
+    }
+
+    function setDir(dir) {
+        currentDir = dir;
+        document.querySelectorAll('[id^="dir-"]').forEach(btn => btn.classList.remove('active-dir'));
+        document.getElementById('dir-' + dir).classList.add('active-dir');
+    }
+
+    // Init palette
+    const p = document.getElementById('palette');
+    PALETTE.forEach((color, i) => {
+        const s = document.createElement('div');
+        s.className = 'color-swatch' + (i === 0 ? ' active-color' : '');
+        s.style.backgroundColor = '#' + color.toString(16).padStart(6, '0');
+        s.onclick = () => {
+            document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
+            s.classList.add('active-color');
+            currentColor = color;
+            document.getElementById('cur-col-name').innerText = PALETTE_NAMES[i];
+        };
+        p.appendChild(s);
+    });
+
+    const customColorInput = document.getElementById('custom-color');
+    customColorInput.addEventListener('input', (e) => {
+        const hexColor = e.target.value;
+        currentColor = parseInt(hexColor.slice(1), 16);
+        document.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('active-color'));
+        document.getElementById('cur-col-name').innerText = hexColor.toUpperCase();
+    });
+
+    window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; render(); });
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    connect();
+</script>
+</body>
+</html>
