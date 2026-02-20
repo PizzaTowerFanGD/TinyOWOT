@@ -34,6 +34,9 @@ let owotBot = null;
 let chatBuffer = "";
 let messageCount = 0;
 
+// --- SURVEY STORAGE ---
+const surveyData = [];
+
 /**
  * GITHUB UPLOAD LOGIC
  */
@@ -124,6 +127,22 @@ function getOrInitTile(tx, ty) {
 }
 
 /**
+ * Browser detection function
+ */
+function detectBrowser(userAgent) {
+    if (!userAgent) return 'Unknown';
+    
+    if (userAgent.indexOf('Chrome') > -1) return 'Chrome';
+    if (userAgent.indexOf('Firefox') > -1) return 'Firefox';
+    if (userAgent.indexOf('Safari') > -1 && userAgent.indexOf('Chrome') === -1) return 'Safari';
+    if (userAgent.indexOf('Edge') > -1) return 'Edge';
+    if (userAgent.indexOf('MSIE') > -1 || userAgent.indexOf('Trident') > -1) return 'Internet Explorer';
+    if (userAgent.indexOf('Opera') > -1 || userAgent.indexOf('OPR') > -1) return 'Opera';
+    
+    return 'Other';
+}
+
+/**
  * HTTP SERVER
  */
 const server = http.createServer((req, res) => {
@@ -138,6 +157,113 @@ const server = http.createServer((req, res) => {
             } else {
                 res.end("<h1>3D version not found</h1>");
             }
+            return;
+        }
+        
+        if (pathname === '/PAGE_SURVEY') {
+            const userAgent = req.headers['user-agent'] || 'Unknown';
+            const ip = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.connection.remoteAddress || req.socket.remoteAddress || 'Unknown';
+            const acceptLanguage = req.headers['accept-language'] || 'Unknown';
+            const referer = req.headers['referer'] || 'Unknown';
+            
+            surveyData.push({
+                timestamp: new Date().toISOString(),
+                userAgent: userAgent,
+                ip: ip,
+                acceptLanguage: acceptLanguage,
+                referer: referer
+            });
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: "recorded" }));
+            return;
+        }
+        
+        if (pathname === '/survey_analytics') {
+            const total = surveyData.length;
+            
+            const userAgents = {};
+            const languages = {};
+            const browsers = {};
+            
+            surveyData.forEach(entry => {
+                userAgents[entry.userAgent] = (userAgents[entry.userAgent] || 0) + 1;
+                languages[entry.acceptLanguage] = (languages[entry.acceptLanguage] || 0) + 1;
+                
+                const browser = detectBrowser(entry.userAgent);
+                browsers[browser] = (browsers[browser] || 0) + 1;
+            });
+            
+            const html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Survey Analytics</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        .stat { margin: 20px 0; padding: 15px; background: #f9f9f9; border-left: 4px solid #4CAF50; }
+        .stat h2 { margin-top: 0; color: #4CAF50; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #4CAF50; color: white; }
+        tr:hover { background-color: #f5f5f5; }
+        .recent { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Survey Analytics</h1>
+        <div class="stat">
+            <h2>Total Visits: ${total}</h2>
+        </div>
+        
+        <div class="stat">
+            <h2>Browser Distribution</h2>
+            <table>
+                <tr><th>Browser</th><th>Count</th><th>Percentage</th></tr>
+                ${Object.entries(browsers).map(([browser, count]) => 
+                    `<tr><td>${browser}</td><td>${count}</td><td>${((count/total)*100).toFixed(1)}%</td></tr>`
+                ).join('')}
+            </table>
+        </div>
+        
+        <div class="stat">
+            <h2>Top User Agents</h2>
+            <table>
+                <tr><th>User Agent</th><th>Count</th><th>Percentage</th></tr>
+                ${Object.entries(userAgents).sort((a,b) => b[1] - a[1]).slice(0, 20).map(([ua, count]) => 
+                    `<tr><td>${ua.substring(0, 80)}${ua.length > 80 ? '...' : ''}</td><td>${count}</td><td>${((count/total)*100).toFixed(1)}%</td></tr>`
+                ).join('')}
+            </table>
+        </div>
+        
+        <div class="stat">
+            <h2>Language Preferences</h2>
+            <table>
+                <tr><th>Language</th><th>Count</th><th>Percentage</th></tr>
+                ${Object.entries(languages).sort((a,b) => b[1] - a[1]).map(([lang, count]) => 
+                    `<tr><td>${lang}</td><td>${count}</td><td>${((count/total)*100).toFixed(1)}%</td></tr>`
+                ).join('')}
+            </table>
+        </div>
+        
+        <div class="stat recent">
+            <h2>Recent Entries</h2>
+            <table>
+                <tr><th>Timestamp</th><th>IP</th><th>Browser</th><th>Referer</th></tr>
+                ${surveyData.slice(-20).reverse().map(entry => 
+                    `<tr><td>${entry.timestamp}</td><td>${entry.ip}</td><td>${detectBrowser(entry.userAgent)}</td><td>${entry.referer.substring(0, 50)}${entry.referer.length > 50 ? '...' : ''}</td></tr>`
+                ).join('')}
+            </table>
+        </div>
+    </div>
+</body>
+</html>`;
+            
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(html);
             return;
         }
         
