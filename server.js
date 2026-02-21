@@ -29,6 +29,7 @@ const CSRF_INPUT_TAG = `<input type="hidden" name="csrfmiddlewaretoken" value="$
 const tiles = {}; 
 const clients = new Set();
 let owotBot = null;
+const serverStartedAt = Date.now();
 
 // --- LOGGING STATE ---
 let chatBuffer = "";
@@ -142,6 +143,19 @@ function detectBrowser(userAgent) {
     return 'Other';
 }
 
+function getRuntimeStats() {
+    return {
+        uptimeSeconds: Math.floor((Date.now() - serverStartedAt) / 1000),
+        connectedClients2D: clients.size,
+        connectedClients3D: clients3D.size,
+        trackedTiles2D: Object.keys(tiles).length,
+        trackedTiles3D: Object.keys(tiles3D).length,
+        pendingLogMessages: messageCount,
+        surveyResponses: surveyData.length,
+        remoteBotConnected: Boolean(owotBot && owotBot.readyState === WebSocket.OPEN)
+    };
+}
+
 /**
  * HTTP SERVER
  */
@@ -157,6 +171,12 @@ const server = http.createServer((req, res) => {
             } else {
                 res.end("<h1>3D version not found</h1>");
             }
+            return;
+        }
+
+        if (pathname === '/status') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'ok', ...getRuntimeStats() }, null, 2));
             return;
         }
         
