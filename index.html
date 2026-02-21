@@ -135,13 +135,29 @@
 
     function processCommand(val) {
         if (val.startsWith("/help")) {
-            addChatMessage("Help", "/nick [name], /warp [url], /help", "system");
+            addChatMessage("Help", "/nick [name], /warp [url], /roll [max], /coords, /help", "system");
         } else if (val.startsWith("/nick ")) {
             nickname = val.replace("/nick ", "").trim() || "Anon";
             addChatMessage("System", `Name set to: ${nickname}`, "system");
         } else if (val.startsWith("/warp ")) {
             const url = val.replace("/warp ", "").trim();
             connect(url.includes("://") ? url : "ws://" + url);
+        } else if (val.startsWith("/roll")) {
+            const parts = val.trim().split(/\s+/);
+            const max = Number(parts[1] || 100);
+            if (!Number.isFinite(max) || max < 1) {
+                addChatMessage("System", "Usage: /roll [max] where max is a positive number.", "error");
+                return;
+            }
+            const value = 1 + Math.floor(Math.random() * max);
+            const message = `${nickname} rolled 1-${Math.floor(max)}: ${value}`;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ kind: "chat", message }));
+            } else {
+                addChatMessage("System", message, "system");
+            }
+        } else if (val === "/coords") {
+            addChatMessage("System", `Cursor: tile (${selectedCell.tx}, ${selectedCell.ty}), cell (${selectedCell.cx}, ${selectedCell.cy})`, "system");
         } else {
             // Standard Chat
             if (ws && ws.readyState === WebSocket.OPEN) {
